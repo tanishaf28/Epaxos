@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { margin: 0; font-family: var(--font-sans); }
+.container { padding: 1rem 0; }
+.controls { display: flex; gap: 16px; margin-bottom: 1.5rem; align-items: center; }
+button { 
+  padding: 8px 16px; 
+  font-size: 14px; 
+  border-radius: var(--border-radius-md);
+  border: 0.5px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+button:hover { background: var(--color-background-secondary); }
+button:active { transform: scale(0.98); }
+button.active { 
+  background: var(--color-background-info); 
+  color: var(--color-text-info);
+  border-color: var(--color-border-info);
+}
+.legend { display: flex; gap: 24px; font-size: 13px; color: var(--color-text-secondary); }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-box { width: 16px; height: 16px; border-radius: 4px; }
+svg text { user-select: none; }
+.instance-box { cursor: pointer; transition: opacity 0.2s; }
+.instance-box:hover rect { opacity: 0.8; }
+.dep-line { transition: opacity 0.3s, stroke-width 0.3s; }
+.info-panel {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-md);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.info-title { font-weight: 500; margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="controls">
+    <button id="step1" class="active" onclick="showStep(1)">1. Commands arrive</button>
+    <button id="step2" onclick="showStep(2)">2. Deps detected</button>
+    <button id="step3" onclick="showStep(3)">3. Graph built</button>
+    <button id="step4" onclick="showStep(4)">4. Execution order</button>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-box" style="background: #85B7EB;"></div>
+      <span>Independent</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-box" style="background: #5DCAA5;"></div>
+      <span>Hot object (conflicting)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-box" style="background: #ED93B1;"></div>
+      <span>Common object</span>
+    </div>
+  </div>
+
+  <svg id="canvas" width="100%" viewBox="0 0 680 420">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <div id="info" class="info-panel"></div>
+</div>
+
+<script>
+const instances = [
+  { id: 'R0.12', x: 100, y: 60, replica: 0, seq: 1, obj: 'obj-indep-1-42', type: 'indep', deps: [] },
+  { id: 'R1.8', x: 280, y: 60, replica: 1, seq: 2, obj: 'obj-HOT-5', type: 'hot', deps: [] },
+  { id: 'R2.55', x: 460, y: 60, replica: 2, seq: 1, obj: 'obj-indep-5-99', type: 'indep', deps: [] },
+  { id: 'R0.13', x: 100, y: 180, replica: 0, seq: 3, obj: 'obj-common-7', type: 'common', deps: ['R0.12'] },
+  { id: 'R1.9', x: 280, y: 180, replica: 1, seq: 4, obj: 'obj-HOT-5', type: 'hot', deps: ['R1.8', 'R3.20'] },
+  { id: 'R2.56', x: 460, y: 180, replica: 2, seq: 2, obj: 'obj-common-7', type: 'common', deps: ['R0.13'] },
+  { id: 'R3.20', x: 190, y: 300, replica: 3, seq: 3, obj: 'obj-HOT-5', type: 'hot', deps: ['R1.8'] },
+  { id: 'R4.15', x: 370, y: 300, replica: 4, seq: 1, obj: 'obj-indep-3-17', type: 'indep', deps: [] }
+];
+
+const colors = {
+  indep: { fill: '#E6F1FB', stroke: '#378ADD', text: '#0C447C' },
+  hot: { fill: '#E1F5EE', stroke: '#1D9E75', text: '#085041' },
+  common: { fill: '#FBEAF0', stroke: '#D4537E', text: '#72243E' }
+};
+
+let currentStep = 1;
+
+function drawInstances() {
+  const svg = document.getElementById('canvas');
+  svg.innerHTML = svg.querySelector('defs').outerHTML;
+  
+  instances.forEach(inst => {
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'instance-box');
+    g.setAttribute('data-id', inst.id);
+    g.onclick = () => showInstanceInfo(inst);
+    
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', inst.x - 60);
+    rect.setAttribute('y', inst.y - 25);
+    rect.setAttribute('width', 120);
+    rect.setAttribute('height', 50);
+    rect.setAttribute('rx', 8);
+    rect.setAttribute('fill', colors[inst.type].fill);
+    rect.setAttribute('stroke', colors[inst.type].stroke);
+    rect.setAttribute('stroke-width', 0.5);
+    
+    const text1 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text1.setAttribute('x', inst.x);
+    text1.setAttribute('y', inst.y - 4);
+    text1.setAttribute('text-anchor', 'middle');
+    text1.setAttribute('dominant-baseline', 'central');
+    text1.setAttribute('fill', colors[inst.type].text);
+    text1.setAttribute('font-size', 14);
+    text1.setAttribute('font-weight', 500);
+    text1.textContent = inst.id;
+    
+    const text2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text2.setAttribute('x', inst.x);
+    text2.setAttribute('y', inst.y + 12);
+    text2.setAttribute('text-anchor', 'middle');
+    text2.setAttribute('dominant-baseline', 'central');
+    text2.setAttribute('fill', colors[inst.type].text);
+    text2.setAttribute('font-size', 11);
+    text2.setAttribute('opacity', 0.7);
+    text2.textContent = `seq=${inst.seq}`;
+    
+    g.appendChild(rect);
+    g.appendChild(text1);
+    g.appendChild(text2);
+    svg.appendChild(g);
+  });
+}
+
+function drawDependencies() {
+  const svg = document.getElementById('canvas');
+  
+  instances.forEach(inst => {
+    inst.deps.forEach(depId => {
+      const dep = instances.find(i => i.id === depId);
+      if (!dep) return;
+      
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('class', 'dep-line');
+      line.setAttribute('x1', inst.x);
+      line.setAttribute('y1', inst.y - 25);
+      line.setAttribute('x2', dep.x);
+      line.setAttribute('y2', dep.y + 25);
+      line.setAttribute('stroke', '#73726c');
+      line.setAttribute('stroke-width', 1.5);
+      line.setAttribute('marker-end', 'url(#arrow)');
+      line.setAttribute('opacity', 0);
+      
+      svg.insertBefore(line, svg.children[1]);
+    });
+  });
+}
+
+function showStep(step) {
+  currentStep = step;
+  document.querySelectorAll('.controls button').forEach(btn => btn.classList.remove('active'));
+  document.getElementById(`step${step}`).classList.add('active');
+  
+  const lines = document.querySelectorAll('.dep-line');
+  const info = document.getElementById('info');
+  
+  lines.forEach(line => line.setAttribute('opacity', 0));
+  
+  if (step === 1) {
+    info.innerHTML = `
+      <div class="info-title">Step 1: Commands arrive at different replicas</div>
+      <div>Each replica receives client commands independently. Commands are assigned instance IDs (replica.instanceNo) and initially have no dependencies. Click any instance to see its details.</div>
+    `;
+  } else if (step === 2) {
+    lines.forEach(line => line.setAttribute('opacity', 0.6));
+    info.innerHTML = `
+      <div class="info-title">Step 2: Dependencies detected during PreAccept</div>
+      <div>Before registering itself in the conflicts table, each replica reads existing interfering instances. Instances accessing the same object IDs create dependencies. For example, R1.9 depends on both R1.8 and R3.20 because all three access obj-HOT-5.</div>
+    `;
+  } else if (step === 3) {
+    lines.forEach(line => {
+      line.setAttribute('opacity', 0.8);
+      line.setAttribute('stroke-width', 2);
+    });
+    info.innerHTML = `
+      <div class="info-title">Step 3: Dependency graph constructed</div>
+      <div>The complete dependency graph shows which instances must execute before others. Strongly Connected Components (SCCs) are identified using Tarjan's algorithm. Instances with no dependencies (like R0.12, R2.55, R4.15) can execute immediately.</div>
+    `;
+  } else if (step === 4) {
+    lines.forEach(line => line.setAttribute('opacity', 0.4));
+    
+    const highlighted = ['R0.12', 'R2.55', 'R4.15', 'R3.20', 'R1.8', 'R0.13', 'R1.9', 'R2.56'];
+    highlighted.forEach((id, idx) => {
+      const box = document.querySelector(`[data-id="${id}"]`);
+      if (box) {
+        const rect = box.querySelector('rect');
+        setTimeout(() => {
+          rect.style.opacity = '0.3';
+          setTimeout(() => rect.style.opacity = '1', 200);
+        }, idx * 150);
+      }
+    });
+    
+    info.innerHTML = `
+      <div class="info-title">Step 4: Execution order determined</div>
+      <div>Instances are executed in topological order based on their dependency graph and sequence numbers. The execution order is: R0.12 → R2.55 → R4.15 → R3.20 → R1.8 → R0.13 → R1.9 → R2.56. Within an SCC, instances are sorted by ascending sequence number.</div>
+    `;
+  }
+}
+
+function showInstanceInfo(inst) {
+  const info = document.getElementById('info');
+  const depsStr = inst.deps.length > 0 ? inst.deps.join(', ') : 'None';
+  info.innerHTML = `
+    <div class="info-title">${inst.id}</div>
+    <div><strong>Object:</strong> ${inst.obj}</div>
+    <div><strong>Sequence:</strong> ${inst.seq}</div>
+    <div><strong>Dependencies:</strong> ${depsStr}</div>
+    <div><strong>Type:</strong> ${inst.type === 'indep' ? 'Independent' : inst.type === 'hot' ? 'Hot (conflicting)' : 'Common'}</div>
+  `;
+}
+
+drawInstances();
+drawDependencies();
+showStep(1);
+</script>
+</body>
+</html>

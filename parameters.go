@@ -40,16 +40,17 @@ const (
 
 var numOps int
 var numOfServers int
-var threshold int      // F (failures tolerated)
-var fastQuorum int     // N/2 (PreAcceptOKs needed for fast path commit)
-var slowQuorum int     // F + 1 (majority for slow path Accept phase)
-var thriftyContactCount int // F + ⌊(F+1)/2⌋ (replicas to contact in thrifty mode)
+var threshold int           // F (failures tolerated)
+var fastQuorum int          // Remote PreAcceptOK replies needed for fast path commit
+var slowQuorum int          // Remote AcceptOK replies needed for slow path commit
+var thriftyPreAcceptContact int // F + ⌊(F+1)/2⌋ (PreAccept contacts in thrifty mode)
+var thriftyAcceptContact int    // F + 1 (Accept contacts in thrifty mode)
 var myServerID int
 var configPath string
 var production bool
 var logLevel string
 var mode int
-var thriftyMode bool   // Thrifty mode: contact only quorum instead of all replicas
+var thriftyMode bool // Thrifty mode: contact only quorum instead of all replicas
 var evalType int
 
 var batchsize int
@@ -81,63 +82,53 @@ func loadCommandLineInputs() {
 	flag.IntVar(&numOps, "ops", 1000, "number of operations")
 	flag.IntVar(&numOfServers, "n", 5, "# of servers (N = 2F + 1)")
 	flag.IntVar(&threshold, "t", 2, "# of failures tolerated (F)")
-	
+
 	flag.IntVar(&batchsize, "b", 1, "batch size")
 	flag.IntVar(&myServerID, "id", 0, "this server ID")
 	flag.StringVar(&configPath, "path", "./config/cluster_localhost.conf", "config file path")
-	
+
 	flag.BoolVar(&production, "pd", false, "production mode?")
 	flag.StringVar(&logLevel, "log", "debug", "log level")
 	flag.IntVar(&mode, "mode", 0, "0=localhost, 1=distributed")
 	flag.IntVar(&evalType, "et", 0, "0=plain msg, 1=mongodb")
 	flag.BoolVar(&thriftyMode, "thrifty", false, "thrifty mode: contact only quorum instead of all replicas")
-	
+
 	flag.IntVar(&msgsize, "ms", 512, "message size")
-	
+
 	// Object distribution parameters (same as WOC for comparison)
 	flag.Float64Var(&indepRatio, "indep", 70.0, "% of independent objects")
 	flag.Float64Var(&commonRatio, "common", 20.0, "% of common objects")
 	flag.IntVar(&conflictRate, "conflictrate", 10, "% of hot objects (high conflict)")
-	
+
 	// Batch composition mode
-	flag.StringVar(&batchComposition, "bcomp", "object-specific", 
+	flag.StringVar(&batchComposition, "bcomp", "object-specific",
 		"batch composition: 'mixed' | 'object-specific' | 'single_obj'")
-	
+
 	// Max-in-flight control (CORA-style closed-loop execution)
-	flag.BoolVar(&useFixedInflight, "fixed-inflight", false, 
+	flag.BoolVar(&useFixedInflight, "fixed-inflight", false,
 		"Use fixed max-in-flight (CORA closed-loop model) instead of adaptive limiter")
-	
+
 	// MongoDB parameters
 	flag.StringVar(&mongoLoadType, "mload", "a", "mongodb workload")
 	flag.IntVar(&mongoClientNum, "mcli", 16, "# mongodb clients")
-	
+
 	// Crash parameters
 	flag.IntVar(&crashTime, "ct", 20, "rounds before crash")
 	flag.IntVar(&crashMode, "cm", 0, "crash mode")
-	
+
 	flag.StringVar(&suffix, "suffix", "epaxos", "file suffix")
 	flag.IntVar(&role, "role", 0, "0=server, 1=client")
-	
-	flag.Parse()
 
-	// EPaxos quorum calculations (derived from N, not configurable)
-	// EPaxos paper Section 4.4:
-	// - Fast path: total needed = F + ⌊(F+1)/2⌋ (including leader)
-	//   Remote PreAcceptOKs needed = F + ⌊(F+1)/2⌋ - 1 (excluding leader)
-	//   Verification: N=3,F=1: 1+1-1=1 | N=5,F=2: 2+1-1=2 | N=7,F=3: 3+2-1=4
-	// - Slow path: remote AcceptOKs needed = ⌊N/2⌋ (leader+remote > N/2)
-	//   Verification: N=3: 1 | N=5: 2 | N=7: 3 | N=9: 4
-	fastQuorum = threshold + (threshold+1)/2 - 1  // Remote PreAcceptOKs needed
-	slowQuorum = numOfServers / 2                 // Remote AcceptOKs needed (⌊N/2⌋)
-	
-	// Thrifty contact count: F + ⌊(F+1)/2⌋
-	// For F=2: 2 + 1 = 3 replicas contacted in thrifty mode
-	thriftyContactCount = threshold + (threshold+1)/2
-	
+	flag.Parse()
+	fastQuorum = 2*threshold - 1
+	slowQuorum = threshold
+	thriftyPreAcceptContact = threshold + (threshold+1)/2
+	thriftyAcceptContact = threshold + 1
+
 	totalRatio := float64(conflictRate) + indepRatio + commonRatio
-	
-	log.Debugf("EPaxos Config: N=%d, F=%d, FastQ=%d, SlowQ=%d, ThriftyContact=%d",
-		numOfServers, threshold, fastQuorum, slowQuorum, thriftyContactCount)
+
+	log.Debugf("EPaxos Config: N=%d, F=%d, FastQ=%d, SlowQ=%d, ThriftyPreAccept=%d, ThriftyAccept=%d",
+		numOfServers, threshold, fastQuorum, slowQuorum, thriftyPreAcceptContact, thriftyAcceptContact)
 	log.Debugf("Object Distribution: Hot=%d%%, Indep=%.0f%%, Common=%.0f%% (Total=%.0f%%)",
 		conflictRate, indepRatio, commonRatio, totalRatio)
 }

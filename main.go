@@ -31,7 +31,11 @@ func init() {
 
 func main() {
 	loadCommandLineInputs()
-	SetLogger(logLevel, myServerID, production)
+	logLabel := "server"
+	if role == 1 {
+		logLabel = "client"
+	}
+	SetLogger(logLevel, myServerID, production, logLabel)
 	
 	log.Infof("EPaxos starting | ServerID=%d | Role=%d | N=%d | F=%d",
 		myServerID, role, numOfServers, threshold)
@@ -151,7 +155,7 @@ func runServer() {
 			}()
 			epaxosMgr.StopExecution()
 		}()
-		time.Sleep(100 * time.Millisecond) // Allow goroutine to finish
+		time.Sleep(3 * time.Second) // Extra safety margin for shutdown ordering
 		log.Infof("Server %d: Execution goroutine stopped", myServerID)
 		
 		// Step 4: Save metrics (FINAL SAVE)

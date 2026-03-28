@@ -10,7 +10,7 @@ import (
 	"strconv"
 )
 
-func SetLogger(level string, serverID int, production bool) {
+func SetLogger(level string, id int, production bool, label string) {
 	// Parse log level
 	lvl, err := logrus.ParseLevel(level)
 	if err != nil {
@@ -18,15 +18,19 @@ func SetLogger(level string, serverID int, production bool) {
 	}
 	log.SetLevel(lvl)
 
-	// Create server-specific log folder
-	logDir := fmt.Sprintf("./logs/server%d", serverID)
+	if label == "" {
+		label = "server"
+	}
+
+	// Create role-specific log folder
+	logDir := fmt.Sprintf("./logs/%s%d", label, id)
 	if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
 		panic(fmt.Sprintf("Failed to create log folder: %v", err))
 	}
 	log.Infof("Log folder: %s", logDir)
 
-	// Use a server-specific fixed log filename (server1, server2, ...) and truncate it each run
-	logFile := path.Join(logDir, fmt.Sprintf("server%d.txt", serverID))
+	// Use a role-specific fixed log filename and truncate it each run
+	logFile := path.Join(logDir, fmt.Sprintf("%s%d.txt", label, id))
 
 	// Open with O_TRUNC to overwrite the previous log instead of appending
 	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)

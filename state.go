@@ -84,14 +84,14 @@ type Command struct {
 	ClientID    int
 	ClientClock int
 	CmdType     CmdType
-	
+
 	// Object identification (for interference detection)
 	ObjID    string   // Primary object ID
 	ObjType  int      // IndependentObject | CommonObject | HotObject
 	ObjIDs   []string // All object IDs (for batches)
 	ObjTypes []int    // All object types (for batches)
 	IsMixed  bool     // True if batch contains multiple object types
-	
+
 	Payload   interface{} // [][]byte or []mongodb.Query
 	Timestamp time.Time   // For cleanup of stale entries
 }
@@ -99,19 +99,19 @@ type Command struct {
 // Instance represents a Paxos instance with EPaxos attributes
 type Instance struct {
 	sync.RWMutex
-	
+
 	InstanceID InstanceID
 	Command    *Command
-	
+
 	// EPaxos attributes
-	Seq         int
-	Deps        Dependencies
-	Status      InstanceStatus
-	Ballot      int // For recovery
-	
+	Seq    int
+	Deps   Dependencies
+	Status InstanceStatus
+	Ballot int // For recovery
+
 	// Metadata
-	LeaderID    int
-	Timestamp   int64
+	LeaderID  int
+	Timestamp int64
 }
 
 func NewInstance(replicaID, instanceNo, numReplicas int) *Instance {
@@ -126,23 +126,24 @@ func NewInstance(replicaID, instanceNo, numReplicas int) *Instance {
 // EPaxosState manages all instances across all replicas
 type EPaxosState struct {
 	sync.RWMutex
-	
-	myID           int
-	numReplicas    int                      // Total number of replicas in cluster
-	
+	preAcceptMu sync.Mutex
+
+	myID        int
+	numReplicas int // Total number of replicas in cluster
+
 	// EPaxos reference implementation: preallocated array per replica
 	// instanceSpace[replicaID][instanceNo] = *Instance
 	// This is O(1) access without map overhead or locking per access
-	instanceSpace  [][]*Instance            // Preallocated arrays per replica
-	
-	maxInstance    map[int]int              // Max instance number per replica
-	executed       map[InstanceID]bool      // Execution tracking
-	commitIndex    int                      // Number of committed instances
-	
+	instanceSpace [][]*Instance // Preallocated arrays per replica
+
+	maxInstance map[int]int         // Max instance number per replica
+	executed    map[InstanceID]bool // Execution tracking
+	commitIndex int                 // Number of committed instances
+
 	// Per-key per-replica conflict tracking (EPaxos paper Section 4.5)
 	// conflicts[replicaID][key] = highest instance number from that replica touching that key
 	// This is O(1) lookup per key per replica, not O(all instances)
-	conflicts      []map[string]int32       // conflicts[replicaID][objKey] = instanceNo
+	conflicts []map[string]int32 // conflicts[replicaID][objKey] = instanceNo
 }
 
 func NewEPaxosState(myID int, numReplicas int) *EPaxosState {
@@ -155,63 +156,69 @@ func NewEPaxosState(myID int, numReplicas int) *EPaxosState {
 		commitIndex:   0,
 		conflicts:     make([]map[string]int32, numReplicas),
 	}
-	
+
 	// Preallocate instance space per replica (EPaxos reference: 2*1024*1024)
 	// For production, use smaller size or add dynamic growth
 	const INSTANCE_SPACE_SIZE = 1024 * 1024 // 1M instances per replica
-	
+
 	for i := 0; i < numReplicas; i++ {
 		state.maxInstance[i] = 0
 		state.conflicts[i] = make(map[string]int32)
 		state.instanceSpace[i] = make([]*Instance, INSTANCE_SPACE_SIZE)
 	}
-	
+
 	return state
+}
+
+// AtomicPreAccept serializes dependency-read/register/seq-compute for PreAccept.
+func (s *EPaxosState) AtomicPreAccept(fn func()) {
+	s.preAcceptMu.Lock()
+	defer s.preAcceptMu.Unlock()
+	fn()
 }
 
 // GetNextInstance returns the next instance ID for this replica
 func (s *EPaxosState) GetNextInstance() InstanceID {
 	s.Lock()
 	defer s.Unlock()
-	
+
+	instNo := s.maxInstance[s.myID]
 	s.maxInstance[s.myID]++
-	return InstanceID{s.myID, s.maxInstance[s.myID]}
+	return InstanceID{s.myID, instNo}
 }
 
-// GetInstance returns an instance, creating if necessary
-// Uses preallocated array for O(1) access without map overhead
-// CRITICAL FIX: Use read lock for reads, only upgrade to write lock for creation
+
 func (s *EPaxosState) GetInstance(id InstanceID) *Instance {
 	// Bounds check (can be done without lock since array dimensions are fixed)
 	if id.ReplicaID < 0 || id.ReplicaID >= s.numReplicas {
 		log.Errorf("[State] Invalid replica ID: %d", id.ReplicaID)
 		return NewInstance(id.ReplicaID, id.InstanceNo, s.numReplicas)
 	}
-	
+
 	if id.InstanceNo < 0 || id.InstanceNo >= len(s.instanceSpace[id.ReplicaID]) {
-		log.Errorf("[State] Instance number out of bounds: %d (max %d)", 
+		log.Errorf("[State] Instance number out of bounds: %d (max %d)",
 			id.InstanceNo, len(s.instanceSpace[id.ReplicaID])-1)
 		return NewInstance(id.ReplicaID, id.InstanceNo, s.numReplicas)
 	}
-	
+
 	// Fast path: read with read lock (allows concurrent reads)
 	s.RLock()
 	inst := s.instanceSpace[id.ReplicaID][id.InstanceNo]
 	s.RUnlock()
-	
+
 	if inst != nil {
 		return inst
 	}
-	
+
 	// Slow path: need to create instance, acquire write lock
 	s.Lock()
 	defer s.Unlock()
-	
+
 	// Double-check: another goroutine might have created it while we waited for write lock
 	if s.instanceSpace[id.ReplicaID][id.InstanceNo] != nil {
 		return s.instanceSpace[id.ReplicaID][id.InstanceNo]
 	}
-	
+
 	// Create new instance
 	inst = NewInstance(id.ReplicaID, id.InstanceNo, s.numReplicas)
 	s.instanceSpace[id.ReplicaID][id.InstanceNo] = inst
@@ -222,7 +229,7 @@ func (s *EPaxosState) GetInstance(id InstanceID) *Instance {
 func (s *EPaxosState) SetInstance(id InstanceID, inst *Instance) {
 	s.Lock()
 	defer s.Unlock()
-	
+
 	if id.ReplicaID >= 0 && id.ReplicaID < s.numReplicas &&
 		id.InstanceNo >= 0 && id.InstanceNo < len(s.instanceSpace[id.ReplicaID]) {
 		s.instanceSpace[id.ReplicaID][id.InstanceNo] = inst
@@ -234,7 +241,7 @@ func (s *EPaxosState) SetInstance(id InstanceID, inst *Instance) {
 func (s *EPaxosState) RegisterObjectAccess(instanceID InstanceID, objIDs []string) {
 	s.Lock()
 	defer s.Unlock()
-	
+
 	for _, objID := range objIDs {
 		// Update conflict table: store highest instance per key per replica
 		if int32(instanceID.InstanceNo) > s.conflicts[instanceID.ReplicaID][objID] {
@@ -249,15 +256,15 @@ func (s *EPaxosState) RegisterObjectAccess(instanceID InstanceID, objIDs []strin
 func (s *EPaxosState) GetInterferingInstances(cmd *Command) Dependencies {
 	s.RLock()
 	defer s.RUnlock()
-	
+
 	deps := NewDependencies(s.numReplicas)
-	
+
 	// Get all object IDs this command touches
 	objIDs := cmd.ObjIDs
 	if len(objIDs) == 0 && cmd.ObjID != "" {
 		objIDs = []string{cmd.ObjID}
 	}
-	
+
 	// For each key, check conflict table for each replica
 	// O(keys * replicas) instead of O(all instances)
 	for _, objID := range objIDs {
@@ -270,7 +277,7 @@ func (s *EPaxosState) GetInterferingInstances(cmd *Command) Dependencies {
 			}
 		}
 	}
-	
+
 	return deps
 }
 
@@ -278,7 +285,7 @@ func (s *EPaxosState) GetInterferingInstances(cmd *Command) Dependencies {
 func (s *EPaxosState) GetMaxSeq(deps Dependencies) int {
 	s.RLock()
 	defer s.RUnlock()
-	
+
 	maxSeq := 0
 	for replicaID, instNo := range deps {
 		if instNo >= 0 { // -1 means no dependency
@@ -295,7 +302,7 @@ func (s *EPaxosState) GetMaxSeq(deps Dependencies) int {
 			}
 		}
 	}
-	
+
 	return maxSeq
 }
 
@@ -320,18 +327,18 @@ func commandsInterfere(cmd1, cmd2 *Command) bool {
 	if len(objs1) == 0 && cmd1.ObjID != "" {
 		objs1 = []string{cmd1.ObjID}
 	}
-	
+
 	objs2 := cmd2.ObjIDs
 	if len(objs2) == 0 && cmd2.ObjID != "" {
 		objs2 = []string{cmd2.ObjID}
 	}
-	
+
 	// Check if any objects overlap
 	objSet := make(map[string]bool)
 	for _, obj := range objs1 {
 		objSet[obj] = true
 	}
-	
+
 	for _, obj := range objs2 {
 		if objSet[obj] {
 			// Same object accessed
@@ -341,30 +348,23 @@ func commandsInterfere(cmd1, cmd2 *Command) bool {
 			}
 			// Write and read = interfere
 			if (cmd1.CmdType == WRITE && cmd2.CmdType == READ) ||
-			   (cmd1.CmdType == READ && cmd2.CmdType == WRITE) {
+				(cmd1.CmdType == READ && cmd2.CmdType == WRITE) {
 				return true
 			}
 		}
 	}
-	
-	// No overlapping objects or both reads = don't interfere
 	return false
 }
 
-// IsExecuted checks if instance has been executed
+
 func (s *EPaxosState) IsExecuted(id InstanceID) bool {
 	s.RLock()
 	defer s.RUnlock()
 	return s.executed[id]
 }
-
-// MarkExecuted marks instance as executed without deleting conflict entries
-// Conflict tracking must persist to detect future interference correctly
 func (s *EPaxosState) MarkExecuted(id InstanceID) {
 	s.Lock()
 	defer s.Unlock()
 	s.executed[id] = true
-	
-	// Don't delete conflict entries - they're needed for GetInterferingInstances
-	// Memory is managed implicitly: RegisterObjectAccess overwrites with newer instances
+
 }

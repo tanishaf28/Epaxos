@@ -32,13 +32,23 @@ EVAL_TYPE=0              # 0=plain msg, 1=mongodb
 BATCHSIZE=1             # Batch size per RPC
 MSG_SIZE=512
 MODE=1                   # Distributed mode
-CONFLICT_RATE=00          # Hot object conflict rate (0-100%)
-INDEP_RATIO=100.0         # % independent objects (fast path)
+CONFLICT_RATE=100          # Hot object conflict rate (0-100%)
+INDEP_RATIO=00.0         # % independent objects (fast path)
 COMMON_RATIO=00.0         # % common objects
 BATCH_COMPOSITION="object-specific"
 PIPELINE_MODE="true"
 MAX_INFLIGHT=4          # Max concurrent batches
 LOG_LEVEL="info"
+THRIFTY="false"
+CRASH_TIME=0
+CRASH_MODE=0
+
+# Safety guard: this launcher is intended for no-crash runs.
+if [ "${CRASH_MODE}" -ne 0 ] || [ "${CRASH_TIME}" -ne 0 ]; then
+    echo "ERROR: start_cluster.sh is configured for no-crash runs, but CRASH_MODE=${CRASH_MODE} CRASH_TIME=${CRASH_TIME}."
+    echo "Set both to 0 or use a dedicated crash-test launcher."
+    exit 1
+fi
 
 # -----------------------------
 # CLOUD IP LIST
@@ -92,10 +102,14 @@ start_server() {
             -id=${SERVER_ID} \
             -n=${NUM_SERVERS} \
             -t=${THRESHOLD} \
+            -suffix=s${SERVER_ID}_n${NUM_SERVERS}_f${THRESHOLD}_b${BATCHSIZE} \
             -path=${CONFIG_PATH} \
             -pd=true \
             -role=0 \
             -b=${BATCHSIZE} \
+            -thrifty=${THRIFTY} \
+            -ct=0 \
+            -cm=0 \
             -indep=${INDEP_RATIO} \
             -common=${COMMON_RATIO} \
             -conflictrate=${CONFLICT_RATE} \
@@ -126,6 +140,7 @@ start_client() {
             -id=${CLIENT_ID} \
             -n=${NUM_SERVERS} \
             -t=${THRESHOLD} \
+            -suffix=client${CLIENT_ID}_epaxos \
             -path=${CONFIG_PATH} \
             -ops=${OPS} \
             -et=${EVAL_TYPE} \
@@ -139,7 +154,6 @@ start_client() {
             -ms=${MSG_SIZE} \
             -mode=${MODE} \
             -log=${LOG_LEVEL} \
-            ${FIXED_FLAG} \
             > ${LOG_DIR}/client${CLIENT_ID}/output.log 2>&1 &
         echo \$! > ${LOG_DIR}/client${CLIENT_ID}/pid.txt
     "
@@ -176,6 +190,7 @@ done
 echo "=============================================="
 echo " EPaxos cluster launched successfully!"
 echo "=============================================="
+echo "Crash injection: DISABLED (-cm=0 -ct=0)"
 echo ""
 echo "Monitor logs:"
 echo "  tail -f /home/ubuntu/epaxos/logs/server0/output.log"

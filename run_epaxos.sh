@@ -11,8 +11,8 @@ EVAL_TYPE=0                  # 0=plain msg, 1=mongodb
 BATCHSIZE=1               # Batch size (operations per RPC)
 MSG_SIZE=512                 # Message size for plain msg
 MODE=0                       # 0=localhost, 1=distributed
-CONFLICT_RATE=100              # Hot object conflict rate (0-100%)
-INDEP_RATIO=00.0             # % independent objects (fast path)
+CONFLICT_RATE=00              # Hot object conflict rate (0-100%)
+INDEP_RATIO=100.0             # % independent objects (fast path)
 COMMON_RATIO=00.0             # % common objects (conflicts)
 BATCH_COMPOSITION="object-specific" # "mixed" or "object-specific" or "single_obj"
 PIPELINE_MODE="true"         # "true"=pipeline, "false"=sequential

@@ -173,8 +173,6 @@ func RunClient(clientID int, configPath string, numOps int) {
 	var shuttingDown atomic.Bool
 	var inflightOps atomic.Int64
 	var metricsSaved atomic.Bool
-	
-	// FIXED: Use ChannelLimiter (Acquire outside goroutine)
 	var limiter *ChannelLimiter
 	if pipelined {
 		limiter = NewChannelLimiter(maxInflight, clientID)
@@ -231,15 +229,6 @@ func RunClient(clientID int, configPath string, numOps int) {
 		sig := <-sigChan
 		log.Infof("Client %d: signal %v received — graceful shutdown", clientID, sig)
 		shuttingDown.Store(true)
-
-		// =====================================================================
-		// FIXED SHUTDOWN SEQUENCE:
-		// 1. Stop accepting new work (shuttingDown=true)
-		// 2. Wait for in-flight to drain (with hard deadline)
-		// 3. Force-save metrics REGARDLESS of whether drain completed
-		//    (fixes: CSV not created in conflict cases)
-		// =====================================================================
-
 		// Individual RPC timeout is 15s. Give 20s max to drain.
 		deadline := time.Now().Add(20 * time.Second)
 		for inflightOps.Load() > 0 && time.Now().Before(deadline) {
@@ -250,8 +239,6 @@ func RunClient(clientID int, configPath string, numOps int) {
 		if remaining > 0 {
 			log.Warnf("Client %d: %d ops still in-flight at deadline — saving partial metrics", clientID, remaining)
 		}
-
-		// ALWAYS save — even if partial. This fixes the "no CSV in conflict cases" bug.
 		log.Infof("Client %d: saving metrics (Fast=%d Slow=%d Conflict=%d Timeout=%d)...",
 			clientID, perfM.FastCommits, perfM.SlowCommits, perfM.ConflictCommits, perfM.TimeoutCommits)
 
@@ -421,20 +408,15 @@ func RunClient(clientID int, configPath string, numOps int) {
 				cmd.ObjTypes[b] = objType
 				switch objType {
 				case HotObject:
-					// BUG FIX #9: Use pre-generated pool
 					cmd.ObjIDs[b] = hotObjIDs[(op+b)%10]
 				case IndependentObject:
-					// BUG FIX #9: Use pre-generated pool
 					cmd.ObjIDs[b] = indepObjIDs[(op+b)%100000]
 				case CommonObject:
-					// BUG FIX #9: Use pre-generated pool
 					cmd.ObjIDs[b] = commonObjIDs[((op+b)/10)%10000]
 				}
 			}
 			cmd.ObjID = cmd.ObjIDs[0]
 		}
-
-		// Populate payload
 		switch evalType {
 		case PlainMsg:
 			batch := make([][]byte, currentBatch)
@@ -450,19 +432,10 @@ func RunClient(clientID int, configPath string, numOps int) {
 			cmd.CmdMongo = batch
 		}
 
-		// BUG FIX #10: Select server using round-robin for all object types (matches CORA)
-		// This is both fair AND correct for EPaxos since any replica can be command leader
-		// Previous random routing for hot objects artificially maximized conflicts
 		sid := serverIDs[serverIdx%len(serverIDs)]
 		conn := clientConns[sid]
 
 		if pipelined {
-			// =================================================================
-			// FIXED PIPELINED MODE:
-			// Acquire() is called HERE (main thread) BEFORE launching goroutine.
-			// This means the main thread blocks if all slots are full,
-			// preventing unbounded goroutine creation = no OOM.
-			// =================================================================
 			limiter.Acquire() // BLOCKS main thread until a slot is free
 
 			if shuttingDown.Load() {
@@ -487,31 +460,17 @@ func RunClient(clientID int, configPath string, numOps int) {
 					done <- connection.Call("EPaxosService.ConsensusService", command, reply)
 				}()
 
-				// =============================================================
-				// FIXED RPC TIMEOUT:
-				// Increased from 10s to 15s for high-conflict workloads.
-				// Server worst case: 2s PreAccept timeout + 3s Accept timeout
-				// + queuing time under load. 15s gives plenty of margin.
-				// =============================================================
 				select {
 				case err := <-done:
 					if err != nil {
-						// CRITICAL FIX: Don't call RecordFinisher() for failed RPCs
-						// Failed operations complete in microseconds and shouldn't count toward
-						// throughput (would inflate to 200k-500k Tx/sec). Only track global failures.
 						log.Warnf("[Client %d] RPC error server=%d: %v", clientID, serverID, err)
-						atomic.AddInt64(&perfM.ConflictCommits, int64(bs))
-						// Don't update per-batch metrics - failed ops won't appear in CSV
+						atomic.AddInt64(&perfM.NetworkErrors, int64(bs))
 					} else {
-						// SUCCESS: Record timing and metrics
 						perfM.RecordFinisher(clockVal)
 						recordBatchMetrics(reply, clockVal, bs)
 					}
 				case <-time.After(15 * time.Second):
-					// CRITICAL FIX: Don't call RecordFinisher() for timeouts either
-					// Timeouts are tracked separately and shouldn't affect throughput calculation
 					atomic.AddInt64(&perfM.TimeoutCommits, int64(bs))
-					// Don't update per-batch metrics - timeouts won't appear in CSV
 					log.Warnf("[Client %d] RPC TIMEOUT (15s) batch=%d server=%d", clientID, clockVal, serverID)
 				}
 
@@ -537,10 +496,7 @@ func RunClient(clientID int, configPath string, numOps int) {
 			stack <- struct{}{}
 
 			if err != nil {
-				atomic.AddInt64(&perfM.ConflictCommits, int64(currentBatch))
-				for b := 0; b < currentBatch; b++ {
-					perfM.IncConflict(CClock)
-				}
+				atomic.AddInt64(&perfM.NetworkErrors, int64(currentBatch))
 			} else {
 				recordBatchMetrics(reply, CClock, currentBatch)
 			}

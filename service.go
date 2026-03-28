@@ -1,10 +1,10 @@
 package main
 
 import (
+	"epaxos/mongodb"
 	"errors"
 	"fmt"
 	"time"
-	"epaxos/mongodb"
 )
 
 type EPaxosService struct{}
@@ -41,10 +41,11 @@ type PreAcceptOK struct {
 
 type AcceptArgs struct {
 	InstanceID InstanceID
+	Command    *Command
 	Seq        int
 	Deps       Dependencies
 	LeaderID   int
-	Ballot     int  // Include ballot for recovery Accept phase
+	Ballot     int // Include ballot for recovery Accept phase
 }
 
 type AcceptReply struct {
@@ -70,7 +71,7 @@ type PrepareReply struct {
 
 type CommitArgs struct {
 	InstanceID InstanceID
-	Command    *Command     // Include command for proper recovery and execution
+	Command    *Command // Include command for proper recovery and execution
 	Seq        int
 	Deps       Dependencies
 }
@@ -85,7 +86,7 @@ type ClientArgs struct {
 	ClientClock int
 	ObjID       string
 	ObjType     int
-	Type        int     // PlainMsg, MongoDB
+	Type        int // PlainMsg, MongoDB
 	CmdType     CmdType
 	CmdPlain    [][]byte
 	CmdMongo    []mongodb.Query
@@ -106,7 +107,7 @@ type ClientReply struct {
 // Critical distinction per EPaxos paper: send PreAcceptOK if attributes unchanged, PreAcceptReply otherwise
 func (s *EPaxosService) PreAccept(args *PreAcceptArgs, reply *PreAcceptReply) error {
 	inst := epaxosMgr.state.GetInstance(args.InstanceID)
-	
+
 	inst.Lock()
 
 	// Reject stale PreAccept ballots
@@ -129,42 +130,42 @@ func (s *EPaxosService) PreAccept(args *PreAcceptArgs, reply *PreAcceptReply) er
 	if args.Ballot > inst.Ballot {
 		inst.Ballot = args.Ballot
 	}
-	
+
 	// Set command first
 	inst.Command = args.Command
 	inst.Status = PREACCEPTED
-	inst.Unlock()  // ← Release inst lock BEFORE touching state
-	
+	inst.Unlock() // ← Release inst lock BEFORE touching state
+
 	objIDs := args.Command.ObjIDs
 	if len(objIDs) == 0 && args.Command.ObjID != "" {
 		objIDs = []string{args.Command.ObjID}
 	}
-	
-	// Now safe: no inst lock held
-	// CRITICAL FIX: Read deps BEFORE registering self to avoid self-dependency
-	localDeps := epaxosMgr.state.GetInterferingInstances(args.Command)
-	
-	// NOW register self AFTER reading prior dependencies
-	epaxosMgr.state.RegisterObjectAccess(args.InstanceID, objIDs)
-	localSeq := epaxosMgr.state.GetMaxSeq(localDeps) + 1
-	
+
+	// Keep dependency read + registration + seq computation atomic per replica.
+	var localDeps Dependencies
+	var localSeq int
+	epaxosMgr.state.AtomicPreAccept(func() {
+		// Read deps BEFORE registering self to avoid self-dependency.
+		localDeps = epaxosMgr.state.GetInterferingInstances(args.Command)
+		epaxosMgr.state.RegisterObjectAccess(args.InstanceID, objIDs)
+		localSeq = epaxosMgr.state.GetMaxSeq(localDeps) + 1
+	})
+
 	// Merge with proposed attributes
 	finalDeps := args.Deps.Union(localDeps)
 	finalSeq := args.Seq
 	if localSeq > finalSeq {
 		finalSeq = localSeq
 	}
-	
+
 	// Re-acquire to update instance attributes
 	inst.Lock()
 	inst.Seq = finalSeq
 	inst.Deps = finalDeps
-	
-	// EPaxos paper distinction: Check if attributes changed
 	attributesChanged := (finalSeq != args.Seq) || !finalDeps.Equal(args.Deps)
 	// EPaxos: Any replica can propose any instance, so only check ballot==0, not leader==replica
 	isInitialBallot := (args.Ballot == 0)
-	
+
 	// Build full reply (always fill in for fallback)
 	reply.OK = true
 	reply.Seq = finalSeq
@@ -172,18 +173,13 @@ func (s *EPaxosService) PreAccept(args *PreAcceptArgs, reply *PreAcceptReply) er
 	reply.Ballot = inst.Ballot
 	reply.ReplicaID = epaxosMgr.serverID
 	reply.IsPreAcceptOK = false // Default to full reply
-	inst.Unlock()  // ← Release before accessing epaxosMgr
-	
+	inst.Unlock()               // ← Release before accessing epaxosMgr
+
 	// Include committed instances per replica
 	epaxosMgr.RLock()
 	reply.CommittedUpTo = make([]int32, numOfServers)
 	copy(reply.CommittedUpTo, epaxosMgr.committedUpTo)
 	epaxosMgr.RUnlock()
-	
-	// BUG FIX #3: Add back uncommittedDeps check (matches original EPaxos)
-	// This is required for the optimized recovery procedure (EPaxos paper Section 5)
-	// Check if any dependency is not yet committed
-	// CRITICAL: Use committedUpTo (not executedUpTo) - committed but maybe not executed yet
 	uncommittedDeps := false
 	epaxosMgr.RLock()
 	for replicaID, instNo := range finalDeps {
@@ -193,20 +189,22 @@ func (s *EPaxosService) PreAccept(args *PreAcceptArgs, reply *PreAcceptReply) er
 		}
 	}
 	epaxosMgr.RUnlock()
-	
+
 	// Paper Section 4.4: Send lightweight PreAcceptOK if ALL conditions met:
 	// 1. Attributes unchanged
 	// 2. Initial ballot
 	// 3. All dependencies committed (for optimized recovery)
 	if !attributesChanged && isInitialBallot && !uncommittedDeps {
 		reply.IsPreAcceptOK = true
+		reply.Seq = 0
+		reply.Deps = nil
 		log.Debugf("[PreAccept-RPC] SendingOK | Instance=%s | Replica=%d | AttributesUnchanged=%v | InitialBallot=%v | UncommittedDeps=%v",
 			args.InstanceID, epaxosMgr.serverID, !attributesChanged, isInitialBallot, uncommittedDeps)
 	} else {
 		log.Debugf("[PreAccept-RPC] SendingReply | Instance=%s | Changed=%v | InitBallot=%v | UncommittedDeps=%v",
 			args.InstanceID, attributesChanged, isInitialBallot, uncommittedDeps)
 	}
-	
+
 	return nil
 }
 
@@ -214,12 +212,12 @@ func (s *EPaxosService) PreAccept(args *PreAcceptArgs, reply *PreAcceptReply) er
 func (s *EPaxosService) Accept(args *AcceptArgs, reply *AcceptReply) error {
 	log.Debugf("[Accept-RPC] Instance=%s | Seq=%d | Deps=%d | Ballot=%d",
 		args.InstanceID, args.Seq, len(args.Deps), args.Ballot)
-	
+
 	inst := epaxosMgr.state.GetInstance(args.InstanceID)
-	
+
 	inst.Lock()
 	defer inst.Unlock()
-	
+
 	// CRITICAL: Reject stale Accept ballots (safety requirement for recovery)
 	if args.Ballot < inst.Ballot {
 		reply.OK = false
@@ -228,16 +226,19 @@ func (s *EPaxosService) Accept(args *AcceptArgs, reply *AcceptReply) error {
 			args.Ballot, inst.Ballot, args.InstanceID)
 		return nil
 	}
-	
+
 	// Update to accepted
 	inst.Ballot = args.Ballot
+	if args.Command != nil {
+		inst.Command = args.Command
+	}
 	inst.Seq = args.Seq
 	inst.Deps = args.Deps
 	inst.Status = ACCEPTED
-	
+
 	reply.OK = true
 	reply.ReplicaID = epaxosMgr.serverID
-	
+
 	return nil
 }
 
@@ -245,12 +246,12 @@ func (s *EPaxosService) Accept(args *AcceptArgs, reply *AcceptReply) error {
 // This is the first phase of Explicit Prepare recovery
 func (s *EPaxosService) Prepare(args *PrepareArgs, reply *PrepareReply) error {
 	log.Debugf("[Prepare-RPC] Instance=%s | Ballot=%d", args.InstanceID, args.Ballot)
-	
+
 	inst := epaxosMgr.state.GetInstance(args.InstanceID)
-	
+
 	inst.Lock()
 	defer inst.Unlock()
-	
+
 	// Reject if we've already promised to a higher ballot
 	if args.Ballot <= inst.Ballot {
 		reply.OK = false
@@ -260,10 +261,10 @@ func (s *EPaxosService) Prepare(args *PrepareArgs, reply *PrepareReply) error {
 			args.Ballot, inst.Ballot, args.InstanceID)
 		return nil
 	}
-	
+
 	// Update ballot (promise not to accept lower ballots)
 	inst.Ballot = args.Ballot
-	
+
 	// Return current state
 	reply.OK = true
 	reply.Ballot = inst.Ballot
@@ -272,10 +273,10 @@ func (s *EPaxosService) Prepare(args *PrepareArgs, reply *PrepareReply) error {
 	reply.Deps = inst.Deps.Clone()
 	reply.Command = inst.Command
 	reply.ReplicaID = epaxosMgr.serverID
-	
+
 	log.Debugf("[Prepare-RPC] Accepted | Instance=%s | Status=%v | Seq=%d",
 		args.InstanceID, inst.Status, inst.Seq)
-	
+
 	return nil
 }
 
@@ -283,25 +284,25 @@ func (s *EPaxosService) Prepare(args *PrepareArgs, reply *PrepareReply) error {
 func (s *EPaxosService) Commit(args *CommitArgs, reply *CommitReply) error {
 	log.Debugf("[Commit-RPC] Instance=%s | Seq=%d | Deps=%d",
 		args.InstanceID, args.Seq, len(args.Deps))
-	
+
 	inst := epaxosMgr.state.GetInstance(args.InstanceID)
-	
+
 	inst.Lock()
 	// Update to committed
-	inst.Command = args.Command  // Store command if not already set
+	inst.Command = args.Command // Store command if not already set
 	inst.Seq = args.Seq
 	inst.Deps = args.Deps
 	inst.Status = COMMITTED
-	inst.Unlock()  // CRITICAL FIX: Release inst lock BEFORE calling updateCommittedUpTo
-	
+	inst.Unlock() // CRITICAL FIX: Release inst lock BEFORE calling updateCommittedUpTo
+
 	epaxosMgr.state.UpdateCommitIndex(1)
 	epaxosMgr.updateCommittedUpTo(args.InstanceID.ReplicaID, args.InstanceID.InstanceNo)
-	
+
 	reply.OK = true
-	
+
 	log.Infof("[Commit-RPC] Committed | Instance=%s | Seq=%d",
 		args.InstanceID, args.Seq)
-	
+
 	return nil
 }
 
@@ -323,11 +324,11 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 		reply.ErrorMsg = errors.New("server is shutting down")
 		return reply.ErrorMsg
 	}
-	
+
 	start := time.Now()
 	activeRPCs.Add(1)
 	defer activeRPCs.Add(-1)
-	
+
 	// Determine batch size
 	batchSize := 0
 	if args.Type == PlainMsg {
@@ -335,30 +336,30 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 	} else if args.Type == MongoDB {
 		batchSize = len(args.CmdMongo)
 	}
-	
+
 	if batchSize == 0 {
 		reply.ErrorMsg = errors.New("empty batch")
 		return reply.ErrorMsg
 	}
-	
+
 	// CRITICAL: Validate batch consistency
 	if len(args.ObjIDs) != batchSize {
-		err := fmt.Errorf("ObjIDs length (%d) != batch size (%d)", 
+		err := fmt.Errorf("ObjIDs length (%d) != batch size (%d)",
 			len(args.ObjIDs), batchSize)
 		reply.ErrorMsg = err
 		return err
 	}
-	
+
 	if len(args.ObjTypes) != batchSize {
-		err := fmt.Errorf("ObjTypes length (%d) != batch size (%d)", 
+		err := fmt.Errorf("ObjTypes length (%d) != batch size (%d)",
 			len(args.ObjTypes), batchSize)
 		reply.ErrorMsg = err
 		return err
 	}
-	
+
 	log.Debugf("[Client-RPC] ClientID=%d | ClientClock=%d | BatchSize=%d | IsMixed=%v",
 		args.ClientID, args.ClientClock, batchSize, args.IsMixed)
-	
+
 	// Validate object types
 	for i, objType := range args.ObjTypes {
 		if objType < IndependentObject || objType > HotObject {
@@ -367,7 +368,7 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 			return err
 		}
 	}
-	
+
 	// Create command from args
 	cmd := &Command{
 		ClientID:    args.ClientID,
@@ -379,7 +380,7 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 		ObjTypes:    args.ObjTypes,
 		IsMixed:     args.IsMixed,
 	}
-	
+
 	// Set payload based on type
 	switch args.Type {
 	case PlainMsg:
@@ -391,7 +392,7 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 		reply.ErrorMsg = err
 		return err
 	}
-	
+
 	// Log batch details
 	if args.IsMixed {
 		// Count object types in mixed batch
@@ -414,10 +415,10 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 		log.Infof("[Client-RPC] Single-type batch | Type=%d | Size=%d",
 			args.ObjType, batchSize)
 	}
-	
+
 	// Run consensus and get instance ID(s)
-	primaryInstanceID, allInstanceIDs, success, path := epaxosMgr.HandleCommand(cmd)
-	
+	primaryInstanceID, _, success, path := epaxosMgr.HandleCommand(cmd)
+
 	if !success {
 		reply.Success = false
 		reply.PathUsed = path
@@ -428,22 +429,13 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 			args.ClientClock, path, reply.Latency)
 		return reply.ErrorMsg
 	}
-	
-	// FIX #2: Reply at COMMIT time (not execution time) for fair comparison with CORA
-	// EPaxos paper Section 4.3.1 (line 22): "send commit notification for γ to client"
-	// Section 5 notes execution-time reply is an optional stricter mode for strict serializability.
-	// For fair latency comparison, reply immediately after commit (like CORA).
-	// Execution happens asynchronously in background.
+
 	reply.Success = true
 	reply.PathUsed = path
 	reply.Latency = time.Since(start).Seconds() * 1000
 	reply.ClientClock = args.ClientClock
-	
-	log.Infof("[Client-RPC] SUCCESS (at commit) | Primary=%s | TotalInstances=%d | ClientClock=%d | Path=%s | Latency=%.2fms | BatchSize=%d",
-		primaryInstanceID, len(allInstanceIDs), args.ClientClock, path, reply.Latency, batchSize)
-	
-	// NOTE: Execution continues asynchronously. The execution goroutine will process
-	// the command in the background after dependency resolution.
-	// This matches CORA's behavior: reply at consensus completion, not execution completion.
+
+	log.Infof("[Client-RPC] SUCCESS (at commit) | Primary=%s | ClientClock=%d | Path=%s | Latency=%.2fms | BatchSize=%d",
+		primaryInstanceID, args.ClientClock, path, reply.Latency, batchSize)
 	return nil
 }

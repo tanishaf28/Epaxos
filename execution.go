@@ -1,6 +1,7 @@
 package main
 
 import (
+	"epaxos/mongodb"
 	"fmt"
 	"sort"
 )
@@ -244,19 +245,60 @@ func (m *EPaxosManager) executeInstance(id InstanceID) {
 	log.Debugf("[Execute] Executing instance | Instance=%s | Seq=%d",
 		id, inst.Seq)
 
-	// Execute the command (application-specific)
-	// For now, just mark as executed
-	inst.Status = EXECUTED
+	seq := inst.Seq
 	cmd := inst.Command
+	inst.Unlock()
+
+	if err := m.applyCommandPayload(cmd); err != nil {
+		log.Errorf("[Execute] Command apply failed | Instance=%s | Error=%v", id, err)
+		return
+	}
+
+	inst.Lock()
+	if inst.Status == EXECUTED {
+		inst.Unlock()
+		return
+	}
+	inst.Status = EXECUTED
 	inst.Unlock()
 
 	m.state.MarkExecuted(id)
 
 	if cmd != nil {
 		log.Infof("[Execute] Instance executed | Instance=%s | Seq=%d | CmdType=%v",
-			id, inst.Seq, cmd.CmdType)
+			id, seq, cmd.CmdType)
 	} else {
 		log.Warnf("[Execute] Instance executed without command payload | Instance=%s | Seq=%d",
-			id, inst.Seq)
+			id, seq)
 	}
+}
+
+func (m *EPaxosManager) applyCommandPayload(cmd *Command) error {
+	if cmd == nil {
+		return nil
+	}
+
+	if evalType != MongoDB {
+		return nil
+	}
+
+	queries, ok := cmd.Payload.([]mongodb.Query)
+	if !ok {
+		return fmt.Errorf("unexpected MongoDB payload type %T", cmd.Payload)
+	}
+
+	if len(queries) == 0 {
+		return nil
+	}
+
+	if mongoDbFollower == nil {
+		return fmt.Errorf("mongodb follower is not initialized")
+	}
+
+	_, _, err := mongoDbFollower.FollowerAPI(queries)
+	if err != nil {
+		return fmt.Errorf("mongodb follower query execution failed: %w", err)
+	}
+
+	return nil
 }

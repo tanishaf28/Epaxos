@@ -60,6 +60,18 @@ def _pick_latest_client_csv(csvs: list[str]) -> str:
     return max(csvs, key=os.path.getmtime)
 
 
+def _pick_latest_csv(csvs: list[str]) -> str:
+    # Keep legacy helper name semantics while supporting server/client callers.
+    return _pick_latest_client_csv(csvs)
+
+
+def _filter_metrics_csvs(csvs: list[str], prefix: str) -> list[str]:
+    # Sampled runs also emit tps_timeline_*.csv in client folders.
+    # Restrict merge inputs to true metrics files to avoid schema mismatches.
+    pattern = re.compile(rf"^{re.escape(prefix)}\\d+_.*\\.csv$")
+    return [p for p in csvs if pattern.match(os.path.basename(p))]
+
+
 def _default_output(eval_dir: str, suffix: str = "clients") -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(eval_dir, "merged", f"merged_{suffix}_{timestamp}.csv")
@@ -164,8 +176,12 @@ def merge_client_csvs(
             print(f"  WARNING: No CSV in {client_dir}")
             continue
 
+        metrics_csvs = _filter_metrics_csvs(csvs, "client")
+        if metrics_csvs:
+            csvs = metrics_csvs
+
         # Take the latest run by filename timestamp if present.
-        latest = _pick_latest_client_csv(csvs)
+        latest = _pick_latest_csv(csvs)
         merged_clients += 1
         print(f"  Reading: {latest}")
 
@@ -194,6 +210,11 @@ def merge_client_csvs(
                     tpt = _parse_float(_cell(row, 2))
                     if tpt is not None:
                         all_throughputs.append(tpt)
+                elif label == "AVERAGE":
+                    # Fallback for files with only summary rows and no per-batch samples.
+                    lat = _parse_float(_cell(row, 1))
+                    if lat is not None and lat > 0:
+                        all_latencies.append(lat)
                 elif label == "AVG_FAST_PATH_LATENCY":
                     lat = _parse_float(_cell(row, 1))
                     count = _parse_int(_cell(row, 3))
@@ -324,8 +345,12 @@ def merge_server_csvs(
             print(f"  WARNING: No CSV in {server_dir}")
             continue
 
+        metrics_csvs = _filter_metrics_csvs(csvs, "s")
+        if metrics_csvs:
+            csvs = metrics_csvs
+
         # Take the latest run by filename timestamp if present.
-        latest = _pick_latest_client_csv(csvs)
+        latest = _pick_latest_csv(csvs)
         merged_servers += 1
         print(f"  Reading: {latest}")
 
@@ -354,6 +379,10 @@ def merge_server_csvs(
                     tpt = _parse_float(_cell(row, 2))
                     if tpt is not None:
                         all_throughputs.append(tpt)
+                elif label == "AVERAGE":
+                    lat = _parse_float(_cell(row, 1))
+                    if lat is not None and lat > 0:
+                        all_latencies.append(lat)
                 elif label == "AVG_FAST_PATH_LATENCY":
                     lat = _parse_float(_cell(row, 1))
                     count = _parse_int(_cell(row, 3))
@@ -494,7 +523,6 @@ def main() -> int:
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
         return 1
 
 

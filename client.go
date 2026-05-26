@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"math/rand"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"strings"
 	
 	"epaxos/config"
 	"epaxos/mongodb"
@@ -89,6 +91,127 @@ func (cl *ChannelLimiter) Release() {
 	cl.slots <- struct{}{}
 }
 
+func readTimelineEvent(clientID int) string {
+	eventPath := fmt.Sprintf("./eval/client%d/.event", clientID)
+	data, err := os.ReadFile(eventPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func mongoQueryObjectID(q mongodb.Query) string {
+	if q.Table == "" {
+		return "mongo:unknown"
+	}
+
+	switch q.Op {
+	case mongodb.DROP:
+		return fmt.Sprintf("%s:*", q.Table)
+	case mongodb.SCAN:
+		if q.Key == "" {
+			return fmt.Sprintf("%s:scan:*", q.Table)
+		}
+		return fmt.Sprintf("%s:scan:%s", q.Table, q.Key)
+	default:
+		if q.Key == "" {
+			return fmt.Sprintf("%s:*", q.Table)
+		}
+		return fmt.Sprintf("%s:%s", q.Table, q.Key)
+	}
+}
+
+func startTimelineSampler(clientID int, stop <-chan struct{}) {
+	if os.Getenv("ENABLE_TIMESERIES") != "true" && os.Getenv("TIMESERIES_ENABLED") != "true" {
+		return
+	}
+
+	dirPath := fmt.Sprintf("./eval/client%d", clientID)
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		log.Warnf("Client %d: failed to create timeline dir: %v", clientID, err)
+		return
+	}
+
+	filePath := fmt.Sprintf("%s/tps_timeline_%s.csv", dirPath, time.Now().Format("20060102_150405"))
+	file, err := os.Create(filePath)
+	if err != nil {
+		log.Warnf("Client %d: failed to create timeline file: %v", clientID, err)
+		return
+	}
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{"elapsed_ms", "tps", "lat_avg_ms", "event"}); err != nil {
+		log.Warnf("Client %d: failed to write timeline header: %v", clientID, err)
+		_ = file.Close()
+		return
+	}
+	writer.Flush()
+
+	start := time.Now()
+	lastTick := start
+	lastOps := atomic.LoadInt64(&globalClientMetrics.OpsTotal)
+	lastLatSum := atomic.LoadInt64(&globalClientMetrics.LatSumMs)
+	lastLatCount := atomic.LoadInt64(&globalClientMetrics.LatCount)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	defer func() {
+		writer.Flush()
+		_ = file.Close()
+	}()
+
+	writeSample := func(now time.Time) {
+		elapsedMs := now.Sub(start).Milliseconds()
+		deltaSecs := now.Sub(lastTick).Seconds()
+		if deltaSecs <= 0 {
+			deltaSecs = 0.5
+		}
+
+		opsNow := atomic.LoadInt64(&globalClientMetrics.OpsTotal)
+		latSumNow := atomic.LoadInt64(&globalClientMetrics.LatSumMs)
+		latCountNow := atomic.LoadInt64(&globalClientMetrics.LatCount)
+
+		deltaOps := opsNow - lastOps
+		deltaLatSum := latSumNow - lastLatSum
+		deltaLatCount := latCountNow - lastLatCount
+
+		tps := float64(deltaOps) / deltaSecs
+		latAvg := 0.0
+		if deltaLatCount > 0 {
+			latAvg = float64(deltaLatSum) / float64(deltaLatCount)
+		}
+
+		event := readTimelineEvent(clientID)
+		if event == "" {
+			event = "stable"
+		}
+
+		if err := writer.Write([]string{
+			fmt.Sprintf("%d", elapsedMs),
+			fmt.Sprintf("%.3f", tps),
+			fmt.Sprintf("%.3f", latAvg),
+			event,
+		}); err != nil {
+			log.Warnf("Client %d: failed to write timeline row: %v", clientID, err)
+			return
+		}
+		writer.Flush()
+		lastTick = now
+		lastOps = opsNow
+		lastLatSum = latSumNow
+		lastLatCount = latCountNow
+	}
+
+	for {
+		select {
+		case now := <-ticker.C:
+			writeSample(now)
+		case <-stop:
+			writeSample(time.Now())
+			return
+		}
+	}
+}
+
 // recordBatchMetrics updates perf counters based on RPC reply path
 func recordBatchMetrics(reply *ClientReply, clockVal int, batchSize int) {
 	// Handle MIXED batches (e.g., "MIXED(FAST:5,SLOW:3,HOT:2)")
@@ -156,6 +279,8 @@ func recordBatchMetrics(reply *ClientReply, clockVal int, batchSize int) {
 			perfM.IncConflict(clockVal)
 		}
 	}
+
+	RecordBatch(batchSize, reply.Latency, reply.PathUsed, false)
 }
 
 // RunClient sends operations to replicas
@@ -222,6 +347,14 @@ func RunClient(clientID int, configPath string, numOps int) {
 		log.Fatalf("Client %d: no server connections", clientID)
 	}
 
+	timelineStop := make(chan struct{})
+	var stopTimelineOnce sync.Once
+	stopTimeline := func() {
+		stopTimelineOnce.Do(func() {
+			close(timelineStop)
+		})
+	}
+
 	// Signal handler — saves metrics on SIGTERM
 	sigChan := make(chan os.Signal, 10)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -251,6 +384,7 @@ func RunClient(clientID int, configPath string, numOps int) {
 			metricsSaved.Store(true)
 			log.Infof("Client %d: metrics saved", clientID)
 		}
+		stopTimeline()
 
 		time.Sleep(500 * time.Millisecond) // flush file buffers
 		os.Exit(0)
@@ -294,6 +428,8 @@ func RunClient(clientID int, configPath string, numOps int) {
 
 	fileSuffix := fmt.Sprintf("client%d_epaxos", clientID)
 	perfM.Init(1, batchsize, fileSuffix)
+	go startMetricsServer(clientID)
+	go startTimelineSampler(clientID, timelineStop)
 
 	rand.Seed(time.Now().UnixNano() + int64(clientID))
 	serverIDs := make([]int, 0, len(clientConns))
@@ -309,6 +445,10 @@ func RunClient(clientID int, configPath string, numOps int) {
 		mongoDBQueries, err = mongodb.ReadQueryFromFile(filePath)
 		if err != nil {
 			log.Errorf("ReadQueryFromFile failed: %v", err)
+			return
+		}
+		if len(mongoDBQueries) == 0 {
+			log.Errorf("No MongoDB queries loaded from %s", filePath)
 			return
 		}
 	}
@@ -426,10 +566,19 @@ func RunClient(clientID int, configPath string, numOps int) {
 			cmd.CmdPlain = batch
 		case MongoDB:
 			batch := make([]mongodb.Query, currentBatch)
+			mongoObjIDs := make([]string, currentBatch)
+			mongoObjTypes := make([]int, currentBatch)
 			for b := 0; b < currentBatch; b++ {
-				batch[b] = mongoDBQueries[(op+b)%len(mongoDBQueries)]
+				q := mongoDBQueries[(op+b)%len(mongoDBQueries)]
+				batch[b] = q
+				mongoObjIDs[b] = mongoQueryObjectID(q)
+				mongoObjTypes[b] = IndependentObject
 			}
 			cmd.CmdMongo = batch
+			cmd.ObjIDs = mongoObjIDs
+			cmd.ObjTypes = mongoObjTypes
+			cmd.ObjID = mongoObjIDs[0]
+			cmd.ObjType = mongoObjTypes[0]
 		}
 
 		sid := serverIDs[serverIdx%len(serverIDs)]
@@ -465,12 +614,14 @@ func RunClient(clientID int, configPath string, numOps int) {
 					if err != nil {
 						log.Warnf("[Client %d] RPC error server=%d: %v", clientID, serverID, err)
 						atomic.AddInt64(&perfM.NetworkErrors, int64(bs))
+						RecordBatch(bs, 0, "", true)
 					} else {
 						perfM.RecordFinisher(clockVal)
 						recordBatchMetrics(reply, clockVal, bs)
 					}
 				case <-time.After(15 * time.Second):
 					atomic.AddInt64(&perfM.TimeoutCommits, int64(bs))
+					RecordBatch(bs, 0, "", true)
 					log.Warnf("[Client %d] RPC TIMEOUT (15s) batch=%d server=%d", clientID, clockVal, serverID)
 				}
 
@@ -497,6 +648,7 @@ func RunClient(clientID int, configPath string, numOps int) {
 
 			if err != nil {
 				atomic.AddInt64(&perfM.NetworkErrors, int64(currentBatch))
+				RecordBatch(currentBatch, 0, "", true)
 			} else {
 				recordBatchMetrics(reply, CClock, currentBatch)
 			}
@@ -520,6 +672,7 @@ func RunClient(clientID int, configPath string, numOps int) {
 		} else {
 			log.Infof("Client %d: metrics saved", clientID)
 		}
+		stopTimeline()
 	} else {
 		// Infinite mode: block until signal handler saves and exits
 		for !metricsSaved.Load() {

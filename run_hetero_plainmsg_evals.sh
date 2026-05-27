@@ -859,11 +859,17 @@ fi
 # ================================================================
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
     echo "── EVAL crash: fault injection ─────────────────────────────────"
+
+    _SAVED_RUNTIME=$RUNTIME_SECONDS
+    RUNTIME_SECONDS=60
+    _SAVED_CRASH_TRIGGER=${CRASH_TRIGGER_SECONDS:-10}
+    CRASH_TRIGGER_SECONDS=15
+
     BASE_ENV=(
         "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
         "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
         "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
-        "PIPELINE_MODE=true" "MAX_INFLIGHT=10"
+        "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
         "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
     )
     run_crash_case_sampled "eval_crash_no_failure"  "no_failure"
@@ -871,6 +877,9 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
     run_crash_case_sampled "eval_crash_follower1"   "follower:1"
     run_crash_case_sampled "eval_crash_follower4"   "follower:4"
     run_crash_case_sampled "eval_crash_f_of_n1"     "f_of_n:1"
+
+    RUNTIME_SECONDS=${_SAVED_RUNTIME}
+    CRASH_TRIGGER_SECONDS=${_SAVED_CRASH_TRIGGER}
 fi
 
 # ================================================================
@@ -925,7 +934,7 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" ]]; then
         "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=2" "OPS=0"
         "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
         "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
-        "PIPELINE_MODE=true" "MAX_INFLIGHT=10"
+        "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
         "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
     )
     D4_RUNTIME=$(( RUNTIME_SECONDS < 90 ? 90 : RUNTIME_SECONDS ))

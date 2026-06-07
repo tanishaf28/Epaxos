@@ -15,6 +15,7 @@ source "${SCRIPT_DIR}/sampler_replacement.sh"
 
 START_SCRIPT="${SCRIPT_DIR}/start_cluster_hetero.sh"
 STOP_SCRIPT="${SCRIPT_DIR}/stop_cluster_hetero.sh"
+CONFIG_PATH="${SCRIPT_DIR}/config/cluster_hetero_5n_2s3w.conf"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 USER="ubuntu"
 REMOTE_DIR="/home/ubuntu/epaxos"
@@ -788,6 +789,7 @@ echo ""
 # ================================================================
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval1" ]]; then
     echo "── EVAL 1: Ratio sweep ─────────────────────────────────────────"
+    echo ""
     for case in "100.0/0.0" "90.0/10.0" "80.0/20.0" "60.0/40.0" \
                 "40.0/60.0" "20.0/80.0" "10.0/90.0" "0.0/100.0"; do
         indep="${case%/*}"
@@ -858,6 +860,7 @@ fi
 # EVAL crash: fault injection
 # ================================================================
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
+    TIMESERIES_ENABLED=true
     echo "── EVAL crash: fault injection ─────────────────────────────────"
 
     _SAVED_RUNTIME=$RUNTIME_SECONDS
@@ -870,7 +873,9 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
         "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
         "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
         "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
-        "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
+        "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+        "ENABLE_TIMESERIES=true"
+        "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
     )
     run_crash_case_sampled "eval_crash_no_failure"  "no_failure"
     run_crash_case_sampled "eval_crash_leader"      "leader"
@@ -880,6 +885,7 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
 
     RUNTIME_SECONDS=${_SAVED_RUNTIME}
     CRASH_TRIGGER_SECONDS=${_SAVED_CRASH_TRIGGER}
+    TIMESERIES_ENABLED=false
 fi
 
 # ================================================================
@@ -887,12 +893,11 @@ fi
 # ================================================================
 if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" ]]; then
 
+    TIMESERIES_ENABLED=true
     echo ""
     echo "╔════════════════════════════════════════════════════════════════╗"
     echo "║  EVAL 4: Network Delay  (Cabinet §5.3  D1/D4)                ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
-
-    TIMESERIES_ENABLED=true
 
     _SAVED_RUNTIME=$RUNTIME_SECONDS
     RUNTIME_SECONDS=45
@@ -921,7 +926,9 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" ]]; then
             "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
             "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
             "PIPELINE_MODE=true" "MAX_INFLIGHT=${inflight}"
-            "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
+            "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+            "ENABLE_TIMESERIES=true"
+            "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
         )
         run_d1_case_sampled "eval4_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
     done
@@ -935,7 +942,9 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" ]]; then
         "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
         "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
         "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
-        "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
+        "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+        "ENABLE_TIMESERIES=true"
+        "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
     )
     D4_RUNTIME=$(( RUNTIME_SECONDS < 90 ? 90 : RUNTIME_SECONDS ))
     run_d4_case_sampled "eval4_D4_burst" 15 10 "$D4_RUNTIME"
@@ -972,7 +981,9 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4s" ]]; then
             "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
             "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
             "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
-            "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
+            "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+            "ENABLE_TIMESERIES=true"
+            "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
         )
         run_d1_case_sampled "eval4s_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
     done
@@ -986,7 +997,9 @@ if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4s" ]]; then
         "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
         "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
         "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
-        "LOG_LEVEL=info" "THRIFTY=false" "ENABLE_TIMESERIES=true"
+        "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+        "ENABLE_TIMESERIES=true"
+        "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
     )
     D4_RUNTIME=$(( RUNTIME_SECONDS < 90 ? 90 : RUNTIME_SECONDS ))
     run_d4_case_sampled "eval4s_D4_burst" 15 10 "$D4_RUNTIME"

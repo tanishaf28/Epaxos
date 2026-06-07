@@ -7,7 +7,7 @@ USER="ubuntu"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 REMOTE_DIR="/home/ubuntu/epaxos"
 REMOTE_EVAL_DIR="${REMOTE_DIR}/eval"
-CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_new.conf"
+CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_EVAL_DIR="${SCRIPT_DIR}/eval"
@@ -15,35 +15,21 @@ MERGED_DIR="${LOCAL_EVAL_DIR}/merged"
 MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 
-ALL_SERVER_IPS=(
-"192.168.73.59"
-"192.168.73.243"
-"192.168.73.192"
-"192.168.73.134"
-"192.168.73.132"
-)
-
-ALL_CLIENT_IPS=(
-"192.168.73.218"
-"192.168.73.219"
-)
-
-# Heterogeneous cluster configuration
 SERVER_COUNT="${SERVER_COUNT:-5}"
 CLIENT_COUNT="${CLIENT_COUNT:-2}"
 
-if [ "$SERVER_COUNT" -lt 1 ] || [ "$SERVER_COUNT" -gt "${#ALL_SERVER_IPS[@]}" ]; then
-    echo "ERROR: SERVER_COUNT must be between 1 and ${#ALL_SERVER_IPS[@]}"
+read_node_pool() {
+    mapfile -t NODE_POOL_IPS < <(awk 'NF >= 2 {print $2}' "$CONFIG_PATH")
+    SERVER_IPS=("${NODE_POOL_IPS[@]:0:${SERVER_COUNT}}")
+    CLIENT_IPS=("${NODE_POOL_IPS[@]:${SERVER_COUNT}:${CLIENT_COUNT}}")
+}
+
+read_node_pool
+
+if [ "${#SERVER_IPS[@]}" -ne "$SERVER_COUNT" ] || [ "${#CLIENT_IPS[@]}" -ne "$CLIENT_COUNT" ]; then
+    echo "ERROR: CONFIG_PATH=${CONFIG_PATH} does not contain ${SERVER_COUNT} servers and ${CLIENT_COUNT} clients."
     exit 1
 fi
-
-if [ "$CLIENT_COUNT" -lt 0 ] || [ "$CLIENT_COUNT" -gt 100 ]; then
-    echo "ERROR: CLIENT_COUNT must be between 0 and 100 (got $CLIENT_COUNT)"
-    exit 1
-fi
-
-SERVER_IPS=("${ALL_SERVER_IPS[@]:0:$SERVER_COUNT}")
-CLIENT_IPS=("${ALL_CLIENT_IPS[@]}")
 
 SERVER_ID_FILTER="0-$((${#SERVER_IPS[@]} - 1))"
 CLIENT_START_ID="${#SERVER_IPS[@]}"

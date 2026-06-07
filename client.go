@@ -572,7 +572,7 @@ func RunClient(clientID int, configPath string, numOps int) {
 				q := mongoDBQueries[(op+b)%len(mongoDBQueries)]
 				batch[b] = q
 				mongoObjIDs[b] = mongoQueryObjectID(q)
-				mongoObjTypes[b] = IndependentObject
+				mongoObjTypes[b] = cmd.ObjTypes[b]  
 			}
 			cmd.CmdMongo = batch
 			cmd.ObjIDs = mongoObjIDs

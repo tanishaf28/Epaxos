@@ -50,7 +50,7 @@ func NewEPaxosManager(serverID, numReplicas int) *EPaxosManager {
 	}
 	for i := 0; i < numReplicas; i++ {
 		mgr.committedUpTo[i] = -1
-		mgr.executedUpTo[i] = 0 
+		mgr.executedUpTo[i] = -1 
 		mgr.problemInstance[i] = -1
 	}
 
@@ -105,12 +105,12 @@ func (m *EPaxosManager) continuousExecution() {
 			return
 		case <-ticker.C:
 			// Scan all replicas' instance spaces for committed instances
-			m.RLock()
+			m.state.RLock()
 			maxInstances := make(map[int]int)
 			for replicaID, maxInst := range m.state.maxInstance {
 				maxInstances[replicaID] = maxInst
 			}
-			m.RUnlock()
+			m.state.RUnlock()
 
 			for replicaID, maxInst := range maxInstances {
 				startInst := int(atomic.LoadInt32(&m.executedUpTo[replicaID])) + 1
@@ -199,8 +199,8 @@ func (m *EPaxosManager) IncrementClock() int64 {
 
 func (m *EPaxosManager) HandleCommand(cmd *Command) (InstanceID, []InstanceID, bool, string) {
 	globalClock := int(m.IncrementClock())
-	m.perfM.RecordStarter(globalClock)
-	defer m.perfM.RecordFinisher(globalClock)
+	//m.perfM.RecordStarter(globalClock)
+	//defer m.perfM.RecordFinisher(globalClock)
 
 	if cmd.IsMixed {
 		return m.handleMixedBatch(cmd, globalClock)

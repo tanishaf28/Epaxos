@@ -11,9 +11,9 @@ EVAL_TYPE=0                  # 0=plain msg, 1=mongodb
 BATCHSIZE=1               # Batch size (operations per RPC)
 MSG_SIZE=512                 # Message size for plain msg
 MODE=0                       # 0=localhost, 1=distributed
-CONFLICT_RATE=00              # Hot object conflict rate (0-100%)
-INDEP_RATIO=100.0             # % independent objects (fast path)
-COMMON_RATIO=00.0             # % common objects (conflicts)
+INDEP_RATIO=100.0              # % independent objects; remainder is dependent (WOC-style binary split)
+NUM_OBJECTS=1000            # Total object key-space size (split into indep/dependent pools by INDEP_RATIO)
+READ_RATIO=0.0                # % of ops that are reads (vs writes)
 BATCH_COMPOSITION="object-specific" # "mixed" or "object-specific" or "single_obj"
 PIPELINE_MODE="true"         # "true"=pipeline, "false"=sequential
 MAX_INFLIGHT=4               # Max concurrent batches per client
@@ -22,7 +22,10 @@ LOG_DIR="./logs"
 BINARY="./epaxos"
 LOG_LEVEL="info"             # "debug" for verbose logs
 
-# EPaxos quorum calculations
+# EPaxos quorum calculations — published formula (Moraru/Andersen/Kaminsky
+# SOSP'13 §4.3, confirmed by Tollman/Park/Ousterhout NSDI'21 §2.1):
+# fast quorum = F + floor((F+1)/2) TOTAL (incl. leader), slow quorum = plain
+# majority (F+1 total). They coincide only at N=3,5; fast > majority for N>=7.
 FAST_QUORUM=$((THRESHOLD + (THRESHOLD + 1) / 2))
 SLOW_QUORUM=$((THRESHOLD + 1))
 
@@ -67,8 +70,8 @@ for ((i=0; i<NUM_SERVERS; i++)); do
         -ops=${OPS} \
         -b=${BATCHSIZE} \
         -indep=${INDEP_RATIO} \
-        -common=${COMMON_RATIO} \
-        -conflictrate=${CONFLICT_RATE} \
+        -numobjects=${NUM_OBJECTS} \
+        -readratio=${READ_RATIO} \
         -et=${EVAL_TYPE} \
         -ms=${MSG_SIZE} \
         -mode=${MODE} \
@@ -104,7 +107,6 @@ for ((i=0; i<NUM_CLIENTS; i++)); do
     
     echo "Starting Client ${client_id}..."
     
-    # Build client command with optional fixed-inflight flag
     CLIENT_CMD="GOGC=100 PIPELINE_MODE=${PIPELINE_MODE} MAX_INFLIGHT=${MAX_INFLIGHT} $BINARY \
         -id=${client_id} \
         -n=${NUM_SERVERS} \
@@ -116,18 +118,13 @@ for ((i=0; i<NUM_CLIENTS; i++)); do
         -role=1 \
         -b=${BATCHSIZE} \
         -indep=${INDEP_RATIO} \
-        -common=${COMMON_RATIO} \
-        -conflictrate=${CONFLICT_RATE} \
+        -numobjects=${NUM_OBJECTS} \
+        -readratio=${READ_RATIO} \
         -bcomp=${BATCH_COMPOSITION} \
         -ms=${MSG_SIZE} \
         -mode=${MODE} \
         -log=${LOG_LEVEL}"
-    
-    # Add fixed-inflight flag if enabled (for CORA comparison)
-    if [ "${FIXED_INFLIGHT}" = "true" ]; then
-        CLIENT_CMD="${CLIENT_CMD} -fixed-inflight"
-    fi
-    
+
     eval "${CLIENT_CMD}" > "${LOG_DIR}/client${client_id}/output.log" 2>&1 &
     pid=$!
     CLIENT_PIDS+=($pid)
@@ -139,14 +136,14 @@ echo "=============================================="
 echo "EPaxos Cluster Started Successfully"
 echo "=============================================="
 echo "Topology:"
-echo "  Replicas:    ${NUM_SERVERS} (all equal, leaderless)"
-echo "  Clients:     ${NUM_CLIENTS} (IDs: ${NUM_SERVERS}-$((NUM_SERVERS+NUM_CLIENTS-1)))"
+echo "  Replicas:    ${NUM_SERVERS}(all equal, leaderless)"
+echo "  Clients:     ${NUM_CLIENTS}(IDs: ${NUM_SERVERS}-$((NUM_SERVERS+NUM_CLIENTS-1)))"
 echo ""
 echo "EPaxos Configuration:"
 echo "  N (replicas): ${NUM_SERVERS}"
 echo "  F (failures): ${THRESHOLD}"
-echo "  Fast quorum:  ${FAST_QUORUM} replicas (F + ⌊(F+1)/2⌋)"
-echo "  Slow quorum:  ${SLOW_QUORUM} replicas (F + 1 = majority)"
+echo "  Fast quorum:  ${FAST_QUORUM} replicas total (F + floor((F+1)/2), incl. leader)"
+echo "  Slow quorum:  ${SLOW_QUORUM} replicas total (F+1 = plain majority)"
 if [ ${OPS} -le 0 ]; then
     echo "  Operations:   infinite (run until stopped)"
 else
@@ -155,19 +152,16 @@ fi
 echo "  Batch size:   ${BATCHSIZE} operations per RPC"
 echo "  Batch comp:   ${BATCH_COMPOSITION}"
 if [ "${PIPELINE_MODE}" = "true" ]; then
-    if [ "${FIXED_INFLIGHT}" = "true" ]; then
-        echo "  Pipeline:     ENABLED (FIXED max-in-flight=${MAX_INFLIGHT}, CORA mode)"
-    else
-        echo "  Pipeline:     ENABLED (ADAPTIVE: starts at 2, max ${MAX_INFLIGHT})"
-    fi
+    echo "  Pipeline:     ENABLED (fixed max-in-flight=${MAX_INFLIGHT})"
 else
     echo "  Pipeline:     DISABLED (sequential mode)"
 fi
 echo ""
-echo "Object Distribution:"
-echo "  Independent: ${INDEP_RATIO}% (non-interfering, fast path)"
-echo "  Common:      ${COMMON_RATIO}% (may interfere)"
-echo "  Hot/Conflict:${CONFLICT_RATE}% (high interference, slow path)"
+echo "Object Distribution (WOC-style binary split):"
+echo "  Independent: ${INDEP_RATIO}% (namespaced per client, never conflicts)"
+echo "  Dependent:   $(awk -v r="${INDEP_RATIO}" 'BEGIN{printf "%.1f", 100-r}')% (shared pool, where conflicts happen)"
+echo "  NumObjects:  ${NUM_OBJECTS} (key-space size)"
+echo "  ReadRatio:   ${READ_RATIO}%"
 echo ""
 echo "EPaxos Fast Path Conditions:"
 echo "  ✓ Quorum of ${FAST_QUORUM} PreAccept replies received"
@@ -180,34 +174,24 @@ echo "Batch Composition Mode:"
 if [ "${BATCH_COMPOSITION}" == "mixed" ]; then
     echo "  MIXED: Each batch contains diverse objects & types"
     echo "   - Each of the ${BATCHSIZE} ops can target different objects"
-    echo "   - Hot/Independent/Common distributed per ratios above"
+    echo "   - Independent/Dependent distributed per ratios above"
     echo "   - Dependencies calculated per-operation"
 elif [ "${BATCH_COMPOSITION}" == "single_obj" ]; then
     echo "  SINGLE-OBJ: Each batch targets ONE object (all ops same ObjID)"
     echo "   - All ${BATCHSIZE} ops in a batch write to same object"
-    echo "   - Object type chosen per batch (Hot/Indep/Common)"
+    echo "   - Object type chosen per batch (Independent/Dependent)"
     echo "   - Simplified dependency tracking"
 else
     echo "  OBJECT-SPECIFIC: Each batch contains ONE object type"
-    echo "   - All ${BATCHSIZE} ops in batch are same type (Hot/Indep/Common)"
+    echo "   - All ${BATCHSIZE} ops in batch are same type (Independent/Dependent)"
     echo "   - Each op can target different object within that type"
     echo "   - Type-specific dependency calculation"
 fi
 echo ""
 echo "Concurrency Control:"
 if [ "${PIPELINE_MODE}" = "true" ]; then
-    if [ "${FIXED_INFLIGHT}" = "true" ]; then
-        echo "  Mode:         FIXED (CORA closed-loop model)"
-        echo "  Max-inflight: ${MAX_INFLIGHT} concurrent batches (never changes)"
-        echo "  Use case:     CORA comparison, reproducible experiments"
-    else
-        echo "  Mode:         ADAPTIVE (EPaxos default)"
-        echo "  Initial:      2 concurrent batches per client"
-        echo "  Max limit:    ${MAX_INFLIGHT} concurrent batches per client"
-        echo "  Auto-adjusts based on fast path ratio and latency"
-        echo "  ⬆ Increase:   Fast path >85%, latency <50ms"
-        echo "  ⬇ Decrease:   Fast path <40%, latency >100ms"
-    fi
+    echo "  Mode:         FIXED max-in-flight (ChannelLimiter, never adjusts)"
+    echo "  Max-inflight: ${MAX_INFLIGHT} concurrent batches per client"
 else
     echo "  Mode:         SEQUENTIAL (no pipelining)"
 fi
@@ -219,20 +203,16 @@ echo "  Log Level:   ${LOG_LEVEL}"
 echo "=============================================="
 echo ""
 echo "Monitor logs with:"
-echo "  # Replica logs:"
-echo "  tail -f ${LOG_DIR}/server0/output.log"
+echo "  # Real per-replica/per-client logs (output.log is just the stdout"
+echo "  # redirect and stays mostly empty — actual logrus output goes here):"
+echo "  tail -f ${LOG_DIR}/server0/server0.txt"
+echo "  tail -f ${LOG_DIR}/client${NUM_SERVERS}/client${NUM_SERVERS}.txt"
 echo ""
-echo "  # Client logs (watch fast/slow path):"
-echo "  tail -f ${LOG_DIR}/client${NUM_SERVERS}/output.log"
-echo ""
-echo "  # Watch fast path ratio:"
-echo "  tail -f ${LOG_DIR}/client${NUM_SERVERS}/output.log | grep -E '(FAST|SLOW|fast=)'"
-echo ""
-echo "  # Watch adaptive limit changes:"
-echo "  tail -f ${LOG_DIR}/client${NUM_SERVERS}/output.log | grep -E '(⬆|⬇|Limit=)'"
+echo "  # Watch fast/slow path decisions:"
+echo "  tail -f ${LOG_DIR}/client${NUM_SERVERS}/client${NUM_SERVERS}.txt | grep -E '(FastPath|SlowPath|FAST|SLOW)'"
 echo ""
 echo "View all errors:"
-echo "  grep -i error ${LOG_DIR}/*/output.log"
+echo "  grep -i error ${LOG_DIR}/*/*.txt"
 echo ""
 
 # Cleanup function for infinite mode

@@ -206,9 +206,13 @@ func (m *EPaxosManager) topologicalSort(sccs [][]InstanceID, graph map[InstanceI
 	return sorted
 }
 
-// executeSCC executes commands in an SCC (sorted by seq number)
+// executeSCC executes commands in an SCC (sorted by seq number, ties broken
+// deterministically by replica ID then instance number — paper §2.2: "ties
+// broken in a deterministic manner (e.g. by replica id)". Without this,
+// sort.Slice's instability plus findSCCs's map-iteration order (randomized
+// per the Go spec) means two same-seq instances in a conflicting SCC could
+// execute in a different relative order on different replicas.
 func (m *EPaxosManager) executeSCC(scc []InstanceID) {
-	// Sort by sequence number
 	sort.Slice(scc, func(i, j int) bool {
 		instI := m.state.GetInstance(scc[i])
 		instJ := m.state.GetInstance(scc[j])
@@ -221,7 +225,13 @@ func (m *EPaxosManager) executeSCC(scc []InstanceID) {
 		seqJ := instJ.Seq
 		instJ.RUnlock()
 
-		return seqI < seqJ
+		if seqI != seqJ {
+			return seqI < seqJ
+		}
+		if scc[i].ReplicaID != scc[j].ReplicaID {
+			return scc[i].ReplicaID < scc[j].ReplicaID
+		}
+		return scc[i].InstanceNo < scc[j].InstanceNo
 	})
 
 	// Execute in order

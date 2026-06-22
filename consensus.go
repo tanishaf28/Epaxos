@@ -199,8 +199,8 @@ func (m *EPaxosManager) IncrementClock() int64 {
 
 func (m *EPaxosManager) HandleCommand(cmd *Command) (InstanceID, []InstanceID, bool, string) {
 	globalClock := int(m.IncrementClock())
-	//m.perfM.RecordStarter(globalClock)
-	//defer m.perfM.RecordFinisher(globalClock)
+	m.perfM.RecordStarter(globalClock)
+	defer m.perfM.RecordFinisher(globalClock)
 
 	if cmd.IsMixed {
 		return m.handleMixedBatch(cmd, globalClock)
@@ -279,7 +279,7 @@ func (m *EPaxosManager) handleMixedBatch(cmd *Command, globalClock int) (Instanc
 
 			if success {
 				m.perfM.MarkSlowPath(globalClock) // Mark batch as using slow path
-				if objType == HotObject {
+				if objType == DependentObject {
 					hotOps++
 					atomic.AddInt64(&m.perfM.ConflictCommits, 1)
 					m.perfM.IncConflict(globalClock)
@@ -344,7 +344,7 @@ func (m *EPaxosManager) handleSingleTypeBatch(cmd *Command, globalClock int) (In
 		if success {
 			atomic.AddInt64(&m.perfM.SlowCommits, int64(batchSize))
 
-			if cmd.ObjType == HotObject {
+			if cmd.ObjType == DependentObject {
 				atomic.AddInt64(&m.perfM.ConflictCommits, int64(batchSize))
 				for i := 0; i < batchSize; i++ {
 					m.perfM.IncConflict(globalClock)
@@ -356,7 +356,7 @@ func (m *EPaxosManager) handleSingleTypeBatch(cmd *Command, globalClock int) (In
 			}
 
 			m.perfM.MarkSlowPath(globalClock)
-			if cmd.ObjType == HotObject {
+			if cmd.ObjType == DependentObject {
 				path = fmt.Sprintf("HOT:%d", batchSize)
 			}
 		}
@@ -520,8 +520,10 @@ func (m *EPaxosManager) runFastPath(instanceID InstanceID, cmd *Command) (bool, 
 		close(responses)
 	}()
 
-	preAcceptOKCount := 0
-	fullReplyCount := 0
+	preAcceptOKCount := 0 // Lightweight OK replies (attrs unchanged, no need to inspect)
+	fullMatchCount := 0   // Full replies that still agree with the leader's proposed attrs
+	disagreeCount := 0    // Full replies that changed seq/deps from what the leader proposed
+	nackCount := 0        // OK=false: RPC failure/timeout/stale-ballot — doesn't count either way
 
 	mergedSeq := seq
 	mergedDeps := deps.Clone()
@@ -530,12 +532,14 @@ func (m *EPaxosManager) runFastPath(instanceID InstanceID, cmd *Command) (bool, 
 	allEqual := true // Tracks whether replies preserve the leader-proposed attributes.
 
 	for reply := range responses {
-		if reply.IsPreAcceptOK {
+		if !reply.OK {
+			// Failure/timeout/stale-ballot reply: not a vote either way, must not
+			// be treated as a disagreement (it carries no real Seq/Deps).
+			nackCount++
+		} else if reply.IsPreAcceptOK {
 			preAcceptOKCount++
 			// PreAcceptOK means attributes unchanged — original attrs still valid
 		} else {
-			fullReplyCount++
-
 			// Merge from full replies, regardless of fast/slow path decision.
 			if reply.Seq > mergedSeq {
 				mergedSeq = reply.Seq
@@ -545,24 +549,26 @@ func (m *EPaxosManager) runFastPath(instanceID InstanceID, cmd *Command) (bool, 
 			// Full reply is still fast-path compatible only if it preserves proposed attrs.
 			if reply.Seq != proposedSeq || !reply.Deps.Equal(proposedDeps) {
 				allEqual = false
+				disagreeCount++
+			} else {
+				fullMatchCount++
 			}
 		}
 
 		// BUG FIX #9: Early exit when we have all contacted replies (not all servers)
-		totalReplies := preAcceptOKCount + fullReplyCount
-		if totalReplies >= contactCount {
+		if preAcceptOKCount+fullMatchCount+disagreeCount+nackCount >= contactCount {
 			cancel()
 			break
 		}
 	}
 
 	latency := time.Since(start).Milliseconds()
-	totalReplies := preAcceptOKCount + fullReplyCount
+	matchCount := preAcceptOKCount + fullMatchCount
 
-	log.Debugf("[FastPath] Collected replies | Instance=%s | PreAcceptOKs=%d | FullReplies=%d | Total=%d | AllEqual=%v",
-		instanceID, preAcceptOKCount, fullReplyCount, totalReplies, allEqual)
+	log.Debugf("[FastPath] Collected replies | Instance=%s | PreAcceptOKs=%d | FullMatches=%d | Nacks=%d | AllEqual=%v",
+		instanceID, preAcceptOKCount, fullMatchCount, nackCount, allEqual)
 
-	if preAcceptOKCount >= fastQuorum && allEqual {
+	if matchCount >= fastQuorum && allEqual {
 		inst.Lock()
 		inst.Seq = seq   // Keep original seq
 		inst.Deps = deps // Keep original deps
@@ -572,22 +578,22 @@ func (m *EPaxosManager) runFastPath(instanceID InstanceID, cmd *Command) (bool, 
 		m.state.SetInstance(instanceID, inst)
 		m.updateCommittedUpTo(instanceID.ReplicaID, instanceID.InstanceNo)
 
-		log.Infof("[FastPath] SUCCESS | Instance=%s | Seq=%d | PreAcceptOKs=%d | Latency=%dms",
-			instanceID, seq, preAcceptOKCount, latency)
+		log.Infof("[FastPath] SUCCESS | Instance=%s | Seq=%d | MatchingReplies=%d | Latency=%dms",
+			instanceID, seq, matchCount, latency)
 
 		go m.broadcastCommit(instanceID, seq, deps)
 		return true, "FAST", start
 	}
 
-	if fullReplyCount > 0 {
+	if !allEqual {
 		inst.Lock()
 		inst.Seq = mergedSeq
 		inst.Deps = mergedDeps
 		inst.Unlock()
 	}
 
-	log.Debugf("[FastPath] Cannot commit | Instance=%s | Reason: PreAcceptOKs=%d (need %d) OR allEqual=%v",
-		instanceID, preAcceptOKCount, fastQuorum, allEqual)
+	log.Debugf("[FastPath] Cannot commit | Instance=%s | Reason: MatchingReplies=%d (need %d) OR allEqual=%v",
+		instanceID, matchCount, fastQuorum, allEqual)
 
 	return false, "FAST", start
 }

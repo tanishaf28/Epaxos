@@ -14,11 +14,14 @@ const (
 	MongoDB
 )
 
-// Object types for workload characterization (same as WOC for comparison)
+// Object types for workload characterization (same as WOC for comparison):
+// a binary Independent/Dependent split, matching WOC's objectmap.go exactly.
+// DependentObject is the type where EPaxos's interference detection actually
+// produces conflicts (cross-client contention); Independent objects are
+// namespaced per client so they never conflict by construction.
 const (
 	IndependentObject = iota
-	CommonObject
-	HotObject // High-conflict shared objects
+	DependentObject
 )
 
 type CmdType int
@@ -41,8 +44,8 @@ const (
 var numOps int
 var numOfServers int
 var threshold int           // F (failures tolerated)
-var fastQuorum int          // Remote PreAcceptOK replies needed for fast path commit
-var slowQuorum int          // Remote AcceptOK replies needed for slow path commit
+var fastQuorum int          // Remote PreAcceptOK/equal-attrs replies needed for fast path commit (F + floor((F+1)/2) total, minus the leader)
+var slowQuorum int          // Remote AcceptOK replies needed for slow path commit (plain majority, F total remote)
 var thriftyPreAcceptContact int // F + ⌊(F+1)/2⌋ (PreAccept contacts in thrifty mode)
 var thriftyAcceptContact int    // F + 1 (Accept contacts in thrifty mode)
 var myServerID int
@@ -56,16 +59,13 @@ var evalType int
 var batchsize int
 var msgsize int
 
-// Object distribution ratios (for fair comparison with WOC)
-var indepRatio float64  // % of independent objects (low interference)
-var commonRatio float64 // % of common objects (medium interference)
-var conflictRate int    // % of hot objects (high interference)
+// Object distribution (for fair comparison with WOC's objectmap.go)
+var indepRatio float64 // % of independent objects; remainder is DependentObject
+var numObjects int     // total key-space size, split into indep/dependent pools by indepRatio
+var readRatio float64  // % of ops that are reads (vs writes)
 
 // Batch composition mode
 var batchComposition string // "mixed" | "object-specific" | "single_obj"
-
-// Max-in-flight control (for CORA-style pipelined execution)
-var useFixedInflight bool // If true, use fixed max-in-flight; if false, use adaptive limiter
 
 // MongoDB parameters
 var mongoLoadType string
@@ -75,7 +75,6 @@ var mongoClientNum int
 var crashTime int
 var crashMode int
 
-var suffix string
 var role int
 
 func loadCommandLineInputs() {
@@ -96,17 +95,13 @@ func loadCommandLineInputs() {
 	flag.IntVar(&msgsize, "ms", 512, "message size")
 
 	// Object distribution parameters (same as WOC for comparison)
-	flag.Float64Var(&indepRatio, "indep", 70.0, "% of independent objects")
-	flag.Float64Var(&commonRatio, "common", 20.0, "% of common objects")
-	flag.IntVar(&conflictRate, "conflictrate", 10, "% of hot objects (high conflict)")
+	flag.Float64Var(&indepRatio, "indep", 70.0, "% of independent objects; remainder is dependent")
+	flag.IntVar(&numObjects, "numobjects", 100000, "total object key-space size (split into indep/dependent pools by -indep)")
+	flag.Float64Var(&readRatio, "readratio", 0.0, "% of ops that are reads (vs writes)")
 
 	// Batch composition mode
 	flag.StringVar(&batchComposition, "bcomp", "object-specific",
 		"batch composition: 'mixed' | 'object-specific' | 'single_obj'")
-
-	// Max-in-flight control (CORA-style closed-loop execution)
-	flag.BoolVar(&useFixedInflight, "fixed-inflight", false,
-		"Use fixed max-in-flight (CORA closed-loop model) instead of adaptive limiter")
 
 	// MongoDB parameters
 	flag.StringVar(&mongoLoadType, "mload", "a", "mongodb workload")
@@ -116,19 +111,30 @@ func loadCommandLineInputs() {
 	flag.IntVar(&crashTime, "ct", 20, "rounds before crash")
 	flag.IntVar(&crashMode, "cm", 0, "crash mode")
 
-	flag.StringVar(&suffix, "suffix", "epaxos", "file suffix")
 	flag.IntVar(&role, "role", 0, "0=server, 1=client")
 
 	flag.Parse()
-	fastQuorum = 2*threshold - 1
+	// Published EPaxos formula (Moraru/Andersen/Kaminsky SOSP'13 §4.3,
+	// confirmed by Tollman/Park/Ousterhout's "EPaxos Revisited", NSDI'21
+	// §2.1): fast-path quorum is F + floor((F+1)/2) replicas TOTAL
+	// (including the leader's own implicit vote); slow-path quorum is
+	// always a plain majority (F+1 total). These two formulas only
+	// coincide at N=3 and N=5 — for N>=7 the fast path genuinely needs
+	// MORE replicas than a simple majority (the larger quorum is what
+	// makes the no-second-round-trip safety argument hold). An earlier
+	// pass at this code set fastQuorum=slowQuorum=F based on reading
+	// github.com/efficient/epaxos's checked-in Go source, which uses a
+	// flat N/2 check for both paths — that reference implementation is
+	// NOT the same as the protocol's own published/peer-reviewed formula,
+	// and matches it only by coincidence at N=3,5. Following the paper,
+	// not that one reference implementation, here.
+	fastQuorum = threshold + (threshold+1)/2 - 1 // remote count; -1 for the leader's implicit vote
 	slowQuorum = threshold
 	thriftyPreAcceptContact = threshold + (threshold+1)/2
 	thriftyAcceptContact = threshold + 1
 
-	totalRatio := float64(conflictRate) + indepRatio + commonRatio
-
 	log.Debugf("EPaxos Config: N=%d, F=%d, FastQ=%d, SlowQ=%d, ThriftyPreAccept=%d, ThriftyAccept=%d",
 		numOfServers, threshold, fastQuorum, slowQuorum, thriftyPreAcceptContact, thriftyAcceptContact)
-	log.Debugf("Object Distribution: Hot=%d%%, Indep=%.0f%%, Common=%.0f%% (Total=%.0f%%)",
-		conflictRate, indepRatio, commonRatio, totalRatio)
+	log.Debugf("Object Distribution: Indep=%.0f%%, Dependent=%.0f%%, NumObjects=%d, ReadRatio=%.0f%%",
+		indepRatio, 100.0-indepRatio, numObjects, readRatio)
 }

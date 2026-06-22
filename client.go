@@ -20,26 +20,70 @@ import (
 )
 
 var (
-	hotObjIDs     [10]string
-	indepObjIDs   [100000]string
-	commonObjIDs  [10000]string
+	indepObjIDs   []string
+	depObjIDs     []string
 	objIDPoolInit sync.Once
 )
 
-
+// initObjectIDPool builds the two-tier object pool, sized by -numobjects and
+// split by -indep, mirroring WOC's objectmap.go InitObjectRegistry exactly:
+// the keyspace is divided once, deterministically, into an Independent and a
+// Dependent range — there is no third "common"/"hot" tier. Independent IDs
+// are namespaced per client so they can never collide across clients (single-
+// writer approximation); Dependent IDs are shared cluster-wide so EPaxos's
+// conflict detection actually has something to detect.
 func initObjectIDPool(clientID int) {
 	objIDPoolInit.Do(func() {
-		for i := 0; i < 10; i++ {
-			hotObjIDs[i] = fmt.Sprintf("obj-HOT-%d", i)
+		indepCount := int(float64(numObjects) * indepRatio / 100.0)
+		if indepCount < 0 {
+			indepCount = 0
 		}
-		for i := 0; i < 100000; i++ {
+		if indepCount > numObjects {
+			indepCount = numObjects
+		}
+		depCount := numObjects - indepCount
+		if depCount < 1 {
+			depCount = 1 // always keep at least one dependent key to pick from
+		}
+
+		indepObjIDs = make([]string, indepCount)
+		for i := 0; i < indepCount; i++ {
 			indepObjIDs[i] = fmt.Sprintf("obj-indep-%d-%d", clientID, i)
 		}
-		for i := 0; i < 10000; i++ {
-			commonObjIDs[i] = fmt.Sprintf("obj-common-%d", i)
+		depObjIDs = make([]string, depCount)
+		for i := 0; i < depCount; i++ {
+			depObjIDs[i] = fmt.Sprintf("obj-dep-%d", i)
 		}
-		log.Infof("[Client %d] Pre-generated object ID pools (10 hot keys, 100k indep, 10k common)", clientID)
+		log.Infof("[Client %d] Pre-generated object ID pools (numobjects=%d, indep=%d, dependent=%d)",
+			clientID, numObjects, indepCount, depCount)
 	})
+}
+
+// pickObjType rolls IndependentObject with probability indepRatio%, DependentObject otherwise.
+func pickObjType() int {
+	if rand.Float64()*100 < indepRatio {
+		return IndependentObject
+	}
+	return DependentObject
+}
+
+// pickObjID does a uniform-random pick within the given type's pool — matching
+// WOC's "-numobjects controls key-space size, uniform-random pick, no Zipfian".
+func pickObjID(objType int) string {
+	pool := depObjIDs
+	if objType == IndependentObject {
+		pool = indepObjIDs
+	}
+	return pool[rand.Intn(len(pool))]
+}
+
+// pickCmdType rolls READ with probability readRatio%, WRITE otherwise — matches
+// WOC's per-iteration read/write coin flip (client.go:860-968 in WOC).
+func pickCmdType() CmdType {
+	if rand.Float64()*100 < readRatio {
+		return READ
+	}
+	return WRITE
 }
 
 // dialClientRPC creates an optimized RPC connection for clients
@@ -477,51 +521,31 @@ func RunClient(clientID int, configPath string, numOps int) {
 		cmd := &ClientArgs{
 			ClientID:    clientID,
 			ClientClock: CClock,
-			CmdType:     WRITE,
+			CmdType:     pickCmdType(), // -readratio: one read/write coin flip per client iteration, matching WOC
 			Type:        evalType,
 		}
 
-		// Batch composition logic (matching WOC pattern)
+		// Batch composition logic (matching WOC pattern): mixed re-rolls type
+		// and object per op; single_obj reuses one object for the whole batch
+		// (max contention); object-specific picks one type for the batch but
+		// spreads across different objects of that type. Object IDs are a
+		// uniform-random pick within the chosen type's pool (no Zipfian),
+		// matching WOC's per-op generation loop.
 		if batchComposition == "mixed" {
 			cmd.IsMixed = true
 			cmd.ObjIDs = make([]string, currentBatch)
 			cmd.ObjTypes = make([]int, currentBatch)
 			for b := 0; b < currentBatch; b++ {
-				randVal := rand.Float64() * 100
-				if randVal < float64(conflictRate) {
-					cmd.ObjTypes[b] = HotObject
-					// BUG FIX #9: Use pre-generated pool
-					cmd.ObjIDs[b] = hotObjIDs[(op+b)%10]
-				} else if randVal < float64(conflictRate)+indepRatio {
-					cmd.ObjTypes[b] = IndependentObject
-					// BUG FIX #9: Use pre-generated pool
-					cmd.ObjIDs[b] = indepObjIDs[(op+b)%100000]
-				} else {
-					cmd.ObjTypes[b] = CommonObject
-					// BUG FIX #9: Use pre-generated pool
-					cmd.ObjIDs[b] = commonObjIDs[((op+b)/10)%10000]
-				}
+				objType := pickObjType()
+				cmd.ObjTypes[b] = objType
+				cmd.ObjIDs[b] = pickObjID(objType)
 			}
 			cmd.ObjID = cmd.ObjIDs[0]
 			cmd.ObjType = cmd.ObjTypes[0]
 		} else if batchComposition == "single_obj" {
 			cmd.IsMixed = false
-			randVal := rand.Float64() * 100
-			var objType int
-			var objID string
-			if randVal < float64(conflictRate) {
-				objType = HotObject
-				// BUG FIX #9: Use pre-generated pool
-				objID = hotObjIDs[op%10]
-			} else if randVal < float64(conflictRate)+indepRatio {
-				objType = IndependentObject
-				// BUG FIX #9: Use pre-generated pool
-				objID = indepObjIDs[op%100000]
-			} else {
-				objType = CommonObject
-				// BUG FIX #9: Use pre-generated pool
-				objID = commonObjIDs[(op/10)%10000]
-			}
+			objType := pickObjType()
+			objID := pickObjID(objType)
 			cmd.ObjType = objType
 			cmd.ObjID = objID
 			cmd.ObjIDs = make([]string, currentBatch)
@@ -532,28 +556,13 @@ func RunClient(clientID int, configPath string, numOps int) {
 			}
 		} else { // "object-specific"
 			cmd.IsMixed = false
-			randVal := rand.Float64() * 100
-			var objType int
-			if randVal < float64(conflictRate) {
-				objType = HotObject
-			} else if randVal < float64(conflictRate)+indepRatio {
-				objType = IndependentObject
-			} else {
-				objType = CommonObject
-			}
+			objType := pickObjType()
 			cmd.ObjType = objType
 			cmd.ObjIDs = make([]string, currentBatch)
 			cmd.ObjTypes = make([]int, currentBatch)
 			for b := 0; b < currentBatch; b++ {
 				cmd.ObjTypes[b] = objType
-				switch objType {
-				case HotObject:
-					cmd.ObjIDs[b] = hotObjIDs[(op+b)%10]
-				case IndependentObject:
-					cmd.ObjIDs[b] = indepObjIDs[(op+b)%100000]
-				case CommonObject:
-					cmd.ObjIDs[b] = commonObjIDs[((op+b)/10)%10000]
-				}
+				cmd.ObjIDs[b] = pickObjID(objType)
 			}
 			cmd.ObjID = cmd.ObjIDs[0]
 		}

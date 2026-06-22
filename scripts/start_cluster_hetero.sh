@@ -1,10 +1,14 @@
 #!/bin/bash
 # ================================================================
-# EPaxos Cloud Cluster Launcher - HOMOGENEOUS CLUSTER
+# EPaxos Cloud Cluster Launcher - HETEROGENEOUS CLUSTER
 # ================================================================
 
 set -e
 trap 'echo " Script interrupted. Exiting..."; exit 1' INT
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$SCRIPT_DIR"
 
 # -----------------------------
 # USER / SSH CONFIG
@@ -17,57 +21,53 @@ SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 # -----------------------------
 REMOTE_DIR="/home/ubuntu/epaxos"
 BINARY="epaxos"
-CONFIG_PATH="${REMOTE_DIR}/config/cluster_homo.conf"
+CONFIG_PATH="${CONFIG_PATH:-${REMOTE_DIR}/config/cluster_hetero_5n_2s_3w.conf}"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 
 # -----------------------------
-# EPAXOS PARAMETERS (Enforced via Env Vars)
+# EPAXOS PARAMETERS
 # -----------------------------
-: "${NUM_SERVERS:?NUM_SERVERS must be set}"
-: "${NUM_CLIENTS:?NUM_CLIENTS must be set}"
-: "${THRESHOLD:?THRESHOLD must be set}"
-: "${OPS:?OPS must be set}"
-: "${EVAL_TYPE:?EVAL_TYPE must be set}"
-: "${BATCHSIZE:?BATCHSIZE must be set}"
-: "${MSG_SIZE:?MSG_SIZE must be set}"
-: "${MODE:?MODE must be set}"
-: "${CONFLICT_RATE:?CONFLICT_RATE must be set}"
-: "${INDEP_RATIO:?INDEP_RATIO must be set}"
-: "${COMMON_RATIO:?COMMON_RATIO must be set}"
-: "${PIPELINE_MODE:?PIPELINE_MODE must be set}"
-: "${MAX_INFLIGHT:?MAX_INFLIGHT must be set}"
-: "${LOG_LEVEL:?LOG_LEVEL must be set}"
-: "${THRIFTY:?THRIFTY must be set}"
+NUM_SERVERS="${NUM_SERVERS:-5}"
+NUM_CLIENTS="${NUM_CLIENTS:-2}"
+THRESHOLD="${THRESHOLD:-$(( (NUM_SERVERS - 1) / 2 ))}"
+OPS=0
+EVAL_TYPE=0
+BATCHSIZE="${BATCHSIZE:-1}"
+MSG_SIZE=512
+MODE=1
+INDEP_RATIO="${INDEP_RATIO:-90.0}"
+NUM_OBJECTS="${NUM_OBJECTS:-100000}"
+READ_RATIO="${READ_RATIO:-0.0}"
+BATCH_COMPOSITION="object-specific"
+PIPELINE_MODE="${PIPELINE_MODE:-true}"
+MAX_INFLIGHT="${MAX_INFLIGHT:-5}"
+LOG_LEVEL="${LOG_LEVEL:-info}"
+THRIFTY="${THRIFTY:-false}"
+CRASH_TIME=0
+CRASH_MODE=0
 
-BATCH_COMPOSITION="${BATCH_COMPOSITION:-object-specific}"
-CRASH_TIME="${CRASH_TIME:-0}"
-CRASH_MODE="${CRASH_MODE:-0}"
+# Safety guard: this launcher is intended for no-crash runs.
+if [ "${CRASH_MODE}" -ne 0 ] || [ "${CRASH_TIME}" -ne 0 ]; then
+    echo "ERROR: start_cluster_hetero.sh is configured for no-crash runs, but CRASH_MODE=${CRASH_MODE} CRASH_TIME=${CRASH_TIME}."
+    echo "Set both to 0 or use a dedicated crash-test launcher."
+    exit 1
+fi
 
-# -----------------------------
-# IPs AND CLUSTER SIZING
-# -----------------------------
-ALL_SERVER_IPS=(
-    "192.168.73.220"   # 0
-    "192.168.73.240"   # 1
-    "192.168.73.108"   # 2
-    "192.168.73.179"   # 3
-    "192.168.73.154"   # 4
-    "192.168.73.109"   # 5
-    "192.168.73.203"   # 6
-    "192.168.73.30"    # 7
-    "192.168.73.19"    # 8
-    "192.168.73.127"   # 9
-    "192.168.73.75"    # 10
-)
+read_node_pool() {
+    mapfile -t NODE_POOL_IPS < <(awk 'NF >= 2 {print $2}' "$CONFIG_PATH")
+    SERVER_IPS=("${NODE_POOL_IPS[@]:0:${NUM_SERVERS}}")
+    CLIENT_HOST_IPS=("${NODE_POOL_IPS[@]:${NUM_SERVERS}:${NUM_CLIENTS}}")
+}
 
-# Dynamically slice array based on requested size (3, 5, 7, 11)
-SERVER_IPS=("${ALL_SERVER_IPS[@]:0:$NUM_SERVERS}")
+read_node_pool
 
-CLIENT_HOST_IPS=(
-    "192.168.73.45"
-    "192.168.73.229"
-)
+if [ "${#SERVER_IPS[@]}" -ne "$NUM_SERVERS" ] || [ "${#CLIENT_HOST_IPS[@]}" -ne "$NUM_CLIENTS" ]; then
+    echo "ERROR: CONFIG_PATH=${CONFIG_PATH} does not contain ${NUM_SERVERS} servers and ${NUM_CLIENTS} clients."
+    exit 1
+fi
+
+CLIENTS_PER_VM=1  # One client per VM
 
 # -----------------------------
 # BUILD EPAXOS BINARY LOCALLY
@@ -75,11 +75,11 @@ CLIENT_HOST_IPS=(
 echo "=============================================="
 echo "Building EPaxos binary locally..."
 echo "=============================================="
-go build -o "$BINARY"
+(cd "$REPO_ROOT" && go build -o "${SCRIPT_DIR}/${BINARY}")
 echo " Build complete."
 
 # -----------------------------
-# COPY BINARY AND CONFIG
+# COPY BINARY TO ALL VMs
 # -----------------------------
 copy_binary() {
     local TARGET_IP=$1
@@ -96,18 +96,24 @@ copy_config() {
     scp -i $SSH_KEY "$CONFIG_PATH" $USER@$TARGET_IP:$REMOTE_DIR/config/
 }
 
+
 echo "=============================================="
-echo "Copying binary to ${NUM_SERVERS} servers and client VMs..."
+echo "Copying binary to all servers and clients..."
 echo "=============================================="
 for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
     copy_binary "$ip"
     copy_config "$ip"
 done
-
-# Clean remote eval directories
+# -----------------------------
+# CLEAN REMOTE EVAL DIRECTORIES
+# -----------------------------
+echo "=============================================="
+echo "Cleaning stale remote eval directories..."
+echo "=============================================="
 for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
     ssh -i $SSH_KEY $USER@$ip "rm -rf ${EVAL_DIR}/server* ${EVAL_DIR}/client* ${EVAL_DIR}/merged && mkdir -p ${EVAL_DIR}" || true
 done
+
 
 # -----------------------------
 # START SERVER FUNCTION
@@ -126,17 +132,16 @@ start_server() {
             -id=${SERVER_ID} \
             -n=${NUM_SERVERS} \
             -t=${THRESHOLD} \
-            -suffix=s${SERVER_ID}_n${NUM_SERVERS}_f${THRESHOLD}_b${BATCHSIZE} \
             -path=${CONFIG_PATH} \
             -pd=true \
             -role=0 \
             -b=${BATCHSIZE} \
             -thrifty=${THRIFTY} \
-            -ct=${CRASH_TIME} \
-            -cm=${CRASH_MODE} \
+            -ct=0 \
+            -cm=0 \
             -indep=${INDEP_RATIO} \
-            -common=${COMMON_RATIO} \
-            -conflictrate=${CONFLICT_RATE} \
+            -numobjects=${NUM_OBJECTS} \
+            -readratio=${READ_RATIO} \
             -bcomp=${BATCH_COMPOSITION} \
             -et=${EVAL_TYPE} \
             -ms=${MSG_SIZE} \
@@ -155,12 +160,14 @@ verify_remote_process() {
 
     pid=$(ssh -i $SSH_KEY $USER@$node_ip "cat '${pid_file}' 2>/dev/null" | tr -d '[:space:]')
     if [ -z "$pid" ]; then
-        echo " WARNING: ${label} failed to start (missing pid file)"
+        echo " WARNING: ${label} failed to start (missing pid file: ${pid_file})"
         return 1
     fi
+
     if ssh -i $SSH_KEY $USER@$node_ip "kill -0 ${pid} 2>/dev/null"; then
         return 0
     fi
+
     echo " WARNING: ${label} failed to stay alive (pid ${pid} not running)"
     return 1
 }
@@ -171,7 +178,7 @@ verify_remote_process() {
 start_client() {
     local CLIENT_ID=$1
     local CLIENT_IP=$2
-
+    
     echo " Starting EPaxos Client $CLIENT_ID on $CLIENT_IP ..."
 
     ssh -i $SSH_KEY $USER@$CLIENT_IP "
@@ -184,7 +191,6 @@ start_client() {
             -id=${CLIENT_ID} \
             -n=${NUM_SERVERS} \
             -t=${THRESHOLD} \
-            -suffix=client${CLIENT_ID}_epaxos \
             -path=${CONFIG_PATH} \
             -ops=${OPS} \
             -et=${EVAL_TYPE} \
@@ -192,8 +198,8 @@ start_client() {
             -role=1 \
             -b=${BATCHSIZE} \
             -indep=${INDEP_RATIO} \
-            -common=${COMMON_RATIO} \
-            -conflictrate=${CONFLICT_RATE} \
+            -numobjects=${NUM_OBJECTS} \
+            -readratio=${READ_RATIO} \
             -bcomp=${BATCH_COMPOSITION} \
             -ms=${MSG_SIZE} \
             -mode=${MODE} \
@@ -207,7 +213,7 @@ start_client() {
 # START SERVERS
 # -----------------------------
 echo "=============================================="
-echo "Starting ${NUM_SERVERS} servers (t=${THRESHOLD})..."
+echo "Starting all servers (Heterogeneous Cluster)..."
 echo "=============================================="
 
 for i in "${!SERVER_IPS[@]}"; do
@@ -223,27 +229,46 @@ echo "Waiting 15 seconds for cluster stabilization..."
 sleep 15
 
 # -----------------------------
-# START CLIENTS (Dynamic Round-Robin)
+# START CLIENTS
 # -----------------------------
 echo "=============================================="
-echo "Starting ${NUM_CLIENTS} clients..."
+echo "Starting ${NUM_CLIENTS} clients (${CLIENTS_PER_VM} per VM)..."
 echo "=============================================="
 
 client_id=${NUM_SERVERS}
-for (( i=0; i<NUM_CLIENTS; i++ )); do
-    vm_ip="${CLIENT_HOST_IPS[$(( i % ${#CLIENT_HOST_IPS[@]} ))]}"
-    start_client "$client_id" "$vm_ip"
-    ((client_id++))
-    sleep 1
+
+for vm_ip in "${CLIENT_HOST_IPS[@]}"; do
+    for ((c=0; c<CLIENTS_PER_VM; c++)); do
+        if [ $client_id -lt $((NUM_SERVERS + NUM_CLIENTS)) ]; then
+            start_client "$client_id" "$vm_ip"
+            ((client_id++))
+            sleep 1
+        fi
+    done
 done
 
-for (( i=0; i<NUM_CLIENTS; i++ )); do
+for i in "${!CLIENT_HOST_IPS[@]}"; do
     cid=$((NUM_SERVERS + i))
-    vm_ip="${CLIENT_HOST_IPS[$(( i % ${#CLIENT_HOST_IPS[@]} ))]}"
-    verify_remote_process "$vm_ip" "${LOG_DIR}/client${cid}/pid.txt" "Client ${cid}" || true
+    if [ "$cid" -lt $((NUM_SERVERS + NUM_CLIENTS)) ]; then
+        verify_remote_process "${CLIENT_HOST_IPS[$i]}" "${LOG_DIR}/client${cid}/pid.txt" "Client ${cid}" || true
+    fi
 done
 
 echo "=============================================="
-echo " EPaxos homogeneous cluster launched successfully!"
-echo "  n=${NUM_SERVERS}  t=${THRESHOLD}  clients=${NUM_CLIENTS}"
+echo " EPaxos heterogeneous cluster launched successfully!"
+echo "=============================================="
+echo ""
+echo "Configuration:"
+echo "  Cluster Type: HETEROGENEOUS (${NUM_SERVERS} servers + ${NUM_CLIENTS} clients)"
+echo "  Servers: ${NUM_SERVERS} (IDs 0-$((NUM_SERVERS-1)))"
+echo "  Clients: ${NUM_CLIENTS} (IDs ${NUM_SERVERS}-$((NUM_SERVERS+NUM_CLIENTS-1)))"
+echo "  Config File: $(basename "$CONFIG_PATH")"
+echo "  Threshold: ${THRESHOLD} (F=${THRESHOLD})"
+echo ""
+echo "Monitor logs:"
+echo "  ssh -i $SSH_KEY ubuntu@${SERVER_IPS[0]} 'tail -f ${LOG_DIR}/server0/output.log'"
+echo "  ssh -i $SSH_KEY ubuntu@${CLIENT_HOST_IPS[0]} 'tail -f ${LOG_DIR}/client${NUM_SERVERS}/output.log'"
+echo ""
+echo "Stop all processes:"
+echo "  ./stop_cluster_hetero.sh"
 echo "=============================================="

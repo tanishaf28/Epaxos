@@ -1,24 +1,23 @@
 #!/bin/bash
 # ================================================================
 # HOMOGENEOUS PLAIN-MSG EVALUATION RUNNER — EPaxos
-# Runs eval1 (ratio), eval2 (inflight), eval3 (batchsize),
-# eval4 (msgsize) across cluster sizes n=3,5,7,11.
+# Runs eval1 (ratio), eval2 (batchsize), eval3 (msgsize) across cluster
+# sizes n=3,5,7,11. Mirrors WOC's run_homo_plainmsg_evals.sh structure:
+# max-inflight and read-ratio sweeps live in their own dedicated scripts
+# (run_hetero_maxinflight_eval.sh, run_homo_readratio_eval.sh), not here.
 # ================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$SCRIPT_DIR"
-
-# Source sampler functions
-# shellcheck source=sampler_replacement.sh
-source "${SCRIPT_DIR}/sampler_replacement.sh"
 
 START_SCRIPT="${SCRIPT_DIR}/start_cluster_homo.sh"
 STOP_SCRIPT="${SCRIPT_DIR}/stop_cluster_homo.sh"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 USER="ubuntu"
-RESULT_ROOT="${SCRIPT_DIR}/results/homo_epaxos"
+RESULT_ROOT="${SCRIPT_DIR}/results/homo_plainmsg_evals"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 _RUN_START_EPOCH=$(date +%s)
@@ -53,8 +52,22 @@ touch "${RUN_DIR}/.run_start_marker"
 
 if [[ "${1:-}" == "--help" ]]; then
     cat <<'EOF'
-Usage: bash run_homo_plainmsg.sh [selector]
- Selectors: all, eval1, eval2, eval3, eval4, n3, n5, n7, n11
+Usage: bash run_homo_plainmsg_evals.sh [eval1|eval2|eval3|all|n3|n5|n7|n11]
+
+  eval1   Independent ratio sweep (8 I2D points), batch=1, msgsize=512
+  eval2   Batch size sweep (1,10,50,100,500,1000,2000), indep=90, msgsize=512
+  eval3   Message size sweep (64,512,1024,2048,4096), indep=90, batch=1
+  all     Run eval1, eval2, eval3 (default)
+  n3/n5/n7/n11  Run the full eval suite for one cluster size only
+
+Each eval runs across cluster sizes n = 3, 5, 7, 11 (homogeneous, sliced
+from config/cluster_homo.conf).
+
+Environment overrides:
+  RUNTIME_SECONDS=30   wall-clock seconds per run
+  CLUSTER_SIZES="3 5 7 11"   override the cluster-size sweep
+
+Results archived under: results/homo_plainmsg_evals/<timestamp>/n<N>/<label>/
 EOF
     exit 0
 fi
@@ -62,6 +75,14 @@ fi
 if [[ "${EVAL_ONLY}" == --* ]]; then
     EVAL_ONLY="${EVAL_ONLY#--}"
 fi
+
+case "${EVAL_ONLY}" in
+    all|eval1|eval2|eval3|n3|n5|n7|n11) ;;
+    *)
+        echo "ERROR: unknown selector '${EVAL_ONLY}'. Run with --help."
+        exit 1
+        ;;
+esac
 
 remote_exec() {
     local host=$1; shift
@@ -124,9 +145,9 @@ run_case() {
     sleep "$runtime"
     stop_homo_cluster
     archive_latest_result "$label"
-    
+
     echo "  Cooling down to release TCP ports..."
-    sleep 5 
+    sleep 5
 }
 
 cleanup() {
@@ -151,64 +172,49 @@ run_eval_suite_for_size() {
     echo "║  EPaxos HOMOGENEOUS n=${n}  (t=${t})  — starting eval suite       ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
 
-    # EVAL 1: Ratio sweep
+    # EVAL 1: Ratio sweep (indep%; dependent = 100-indep, binary WOC-style split)
     if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval1" || "$EVAL_ONLY" == "n${n}" ]]; then
-        for case in "100.0/0.0" "90.0/10.0" "80.0/20.0" "60.0/40.0" "40.0/60.0" "20.0/80.0" "10.0/90.0" "0.0/100.0"; do
-            indep="${case%/*}"
-            common="${case#*/}"
+        for indep in "100.0" "90.0" "80.0" "60.0" "40.0" "20.0" "10.0" "0.0"; do
             BASE_ENV=(
                 "NUM_SERVERS=${n}" "NUM_CLIENTS=2" "THRESHOLD=${t}" "OPS=0"
                 "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-                "CONFLICT_RATE=0" "INDEP_RATIO=${indep}" "COMMON_RATIO=${common}"
+                "INDEP_RATIO=${indep}" "NUM_OBJECTS=100000" "READ_RATIO=0.0"
                 "PIPELINE_MODE=true" "MAX_INFLIGHT=5" "LOG_LEVEL=info" "THRIFTY=false"
             )
-            run_case "n${n}_eval1_ratio_${indep}_common_${common}" "$RUNTIME_SECONDS"
+            run_case "n${n}_eval1_ratio_${indep}" "$RUNTIME_SECONDS"
         done
     fi
 
-    # EVAL 2: Max inflight sweep
+    # EVAL 2: Batch size sweep
     if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval2" || "$EVAL_ONLY" == "n${n}" ]]; then
-        for value in 1 2 3 4 5 8 10 15 20 25 30 35 40; do
-            BASE_ENV=(
-                "NUM_SERVERS=${n}" "NUM_CLIENTS=2" "THRESHOLD=${t}" "OPS=0"
-                "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-                "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
-                "PIPELINE_MODE=true" "MAX_INFLIGHT=${value}" "LOG_LEVEL=info" "THRIFTY=false"
-            )
-            run_case "n${n}_eval2_inflight_${value}" "$RUNTIME_SECONDS"
-        done
-    fi
-
-    # EVAL 3: Batch size sweep
-    if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval3" || "$EVAL_ONLY" == "n${n}" ]]; then
         for batch_size in 1 10 50 100 500 1000 2000; do
             BASE_ENV=(
                 "NUM_SERVERS=${n}" "NUM_CLIENTS=2" "THRESHOLD=${t}" "OPS=0"
                 "EVAL_TYPE=0" "BATCHSIZE=${batch_size}" "MSG_SIZE=512" "MODE=1"
-                "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
+                "INDEP_RATIO=90.0" "NUM_OBJECTS=100000" "READ_RATIO=0.0"
                 "PIPELINE_MODE=true" "MAX_INFLIGHT=5" "LOG_LEVEL=info" "THRIFTY=false"
             )
-            run_case "n${n}_eval_batching_${batch_size}" "$RUNTIME_SECONDS"
+            run_case "n${n}_eval2_batch_${batch_size}" "$RUNTIME_SECONDS"
         done
     fi
 
-    # EVAL 4: Message size sweep
-    if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" || "$EVAL_ONLY" == "n${n}" ]]; then
+    # EVAL 3: Message size sweep
+    if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval3" || "$EVAL_ONLY" == "n${n}" ]]; then
         for msg_size in 64 512 1024 2048 4096; do
             BASE_ENV=(
                 "NUM_SERVERS=${n}" "NUM_CLIENTS=2" "THRESHOLD=${t}" "OPS=0"
                 "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=${msg_size}" "MODE=1"
-                "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
+                "INDEP_RATIO=90.0" "NUM_OBJECTS=100000" "READ_RATIO=0.0"
                 "PIPELINE_MODE=true" "MAX_INFLIGHT=5" "LOG_LEVEL=info" "THRIFTY=false"
             )
-            run_case "n${n}_eval_msgsize_${msg_size}" "$RUNTIME_SECONDS"
+            run_case "n${n}_eval3_msgsize_${msg_size}" "$RUNTIME_SECONDS"
         done
     fi
 }
 
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║       HOMOGENEOUS PLAIN-MSG EVALUATION RUNNER — EPaxos         ║"
-echo "║   Evals: ratio / inflight / batchsize / msgsize                ║"
+echo "║   Evals: ratio / batchsize / msgsize                           ║"
 echo "║   Sizes: n=3, 5, 7, 11  |  Clients: 2 (fixed VMs)              ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
@@ -217,4 +223,8 @@ cleanup_all_nodes
 
 for n in "${ALL_CLUSTER_SIZES[@]}"; do run_eval_suite_for_size "$n"; done
 
-echo -e "\n==================================================\n All EPaxos evaluations complete\n Results archived in: $RUN_DIR\n=================================================="
+echo ""
+echo "Extracting throughput/latency summary..."
+python3 "${REPO_ROOT}/extract_metrics.py" "$RUN_DIR"
+
+echo -e "\n==================================================\n All EPaxos evaluations complete\n Results archived in: $RUN_DIR\n Summary CSV: $RUN_DIR/extracted_metrics.csv\n=================================================="

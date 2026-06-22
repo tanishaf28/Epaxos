@@ -9,9 +9,10 @@ REMOTE_DIR="/home/ubuntu/epaxos"
 REMOTE_EVAL_DIR="${REMOTE_DIR}/eval"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 LOCAL_EVAL_DIR="${SCRIPT_DIR}/eval"
 MERGED_DIR="${LOCAL_EVAL_DIR}/merged"
-MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
+MERGE_SCRIPT="${REPO_ROOT}/merge_eval.py"
 
 # -----------------------------
 # CLUSTER IPs

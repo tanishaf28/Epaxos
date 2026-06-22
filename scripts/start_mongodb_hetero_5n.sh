@@ -6,6 +6,10 @@
 set -e
 trap 'echo " Script interrupted. Exiting..."; exit 1' INT
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$SCRIPT_DIR"
+
 # Parse workload argument
 WORKLOAD="${1:-a}"
 if [[ ! "$WORKLOAD" =~ ^[a-f]$ ]]; then
@@ -24,7 +28,7 @@ SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 # -----------------------------
 REMOTE_DIR="${REMOTE_DIR:-/home/ubuntu/epaxos}"
 BINARY="${BINARY:-epaxos}"
-CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
+CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s_3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 
@@ -41,11 +45,10 @@ EVAL_TYPE=0
 BATCHSIZE=10
 MSG_SIZE=512
 MODE=1
-CONFLICT_RATE=0
-INDEP_RATIO=100.0
-COMMON_RATIO=0.0
+INDEP_RATIO="${INDEP_RATIO:-90.0}"
+NUM_OBJECTS="${NUM_OBJECTS:-1000}"    # size of the fixed, hash-ring-mapped object pool
 BATCH_COMPOSITION="object-specific"
-PIPELINE_MODE="true"
+PIPELINE_MODE="${PIPELINE_MODE:-true}"
 MAX_INFLIGHT=5
 USE_ADAPTIVE_LIMITER="false"
 PARALLEL_FAST_PATH="true"
@@ -74,7 +77,7 @@ CLIENTS_PER_VM=1
 echo "=============================================="
 echo "Building EPaxos binary locally..."
 echo "=============================================="
-go build -o "$BINARY"
+(cd "$REPO_ROOT" && go build -o "${SCRIPT_DIR}/${BINARY}")
 echo "Build complete."
 
 # Copy binary to all VMs
@@ -227,6 +230,7 @@ for i in "${!SERVER_IPS[@]}"; do
     ssh -i "$SSH_KEY" "$USER@$ip" bash -s <<EOF &
 set -e
 cd $REMOTE_DIR
+GOGC=50 PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$MAX_INFLIGHT \
 nohup ./$BINARY \
     -id=$i \
     -path=$CONFIG_PATH \
@@ -237,6 +241,9 @@ nohup ./$BINARY \
     -mode=$MODE \
     -mcli=$NUM_CLIENTS \
     -mload=$WORKLOAD \
+    -indep=$INDEP_RATIO \
+    -numobjects=$NUM_OBJECTS \
+    -bcomp=$BATCH_COMPOSITION \
     -role=0 \
     > $log_file 2>&1 &
 echo \$! > /tmp/epaxos_${i}.pid
@@ -260,6 +267,7 @@ for i in "${!CLIENT_HOST_IPS[@]}"; do
         ssh -i "$SSH_KEY" "$USER@$ip" bash -s <<EOF &
 set -e
 cd $REMOTE_DIR
+GOGC=100 PIPELINE_MODE=$PIPELINE_MODE MAX_INFLIGHT=$MAX_INFLIGHT \
 nohup ./$BINARY \
     -id=$client_id \
     -path=$CONFIG_PATH \
@@ -270,6 +278,9 @@ nohup ./$BINARY \
     -mode=$MODE \
     -role=1 \
     -mload=$WORKLOAD \
+    -indep=$INDEP_RATIO \
+    -numobjects=$NUM_OBJECTS \
+    -bcomp=$BATCH_COMPOSITION \
     > $log_file 2>&1 &
 EOF
         sleep 0.5

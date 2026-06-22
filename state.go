@@ -87,7 +87,7 @@ type Command struct {
 
 	// Object identification (for interference detection)
 	ObjID    string   // Primary object ID
-	ObjType  int      // IndependentObject | CommonObject | HotObject
+	ObjType  int      // IndependentObject | DependentObject
 	ObjIDs   []string // All object IDs (for batches)
 	ObjTypes []int    // All object types (for batches)
 	IsMixed  bool     // True if batch contains multiple object types

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(wsl.exe -d Ubuntu-24.04 -- bash -lc \"cd /home/t_fonsec/epaxos && go build -o /tmp/epaxos_test2 . && echo BUILD_OK\")",
+      "PowerShell(wsl.exe -d Ubuntu-24.04 -- bash -lc \"/tmp/epaxos_test2 -h 2>&1 | grep -E 'indep|numobjects|readratio|common|conflictrate'\")",
+      "Bash(rm -f /tmp/epaxos_test /tmp/epaxos_test2 2>/dev/null; true)",
+      "Bash(cd \"//wsl.localhost/Ubuntu-24.04/home/t_fonsec/epaxos\" && ls *.sh *.py 2>/dev/null | sort)",
+      "Read(///wsl.localhost/Ubuntu-24.04/home/t_fonsec/**)",
+      "Bash(grep -n \"^kill_epaxos_on_node\\\\|^apply_uniform_delay\\\\|^remove_all_delay\\\\|^cache_all_interfaces\\\\|^stop_plain_cluster\\\\|^archive_latest_result\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_hetero_plainmsg_evals.sh\")",
+      "Read(///wsl.localhost/Ubuntu-24.04/home/t_fonsec/epaxos/**)",
+      "Bash(cd \"//wsl.localhost/Ubuntu-24.04/home/t_fonsec/epaxos\" && grep -rln '\\\\-common=\\\\|\\\\-conflictrate=' --include=\"*.sh\" .)",
+      "Bash(grep -n \"CONFLICT_RATE\\\\|COMMON_RATIO\\\\|\\\\-common=\\\\|\\\\-conflictrate=\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\start_cluster_homo.sh\")",
+      "Bash(cd \"//wsl.localhost/Ubuntu-24.04/home/t_fonsec/epaxos\" && grep -rln \"start_cluster_homo.sh\" --include=\"*.sh\" .)",
+      "Bash(grep -n \"COMMON_RATIO\\\\|CONFLICT_RATE\\\\|start_cluster_homo\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_homo_plainmsg.sh\")",
+      "Bash(grep -n 'CONFLICT_RATE=0\\\\|COMMON_RATIO=' run_homo_plainmsg.sh run_hetero_plainmsg.sh run_hetero_plainmsg_evals.sh run_epaxos_evalscale_hetero.sh run_all_evals.sh)",
+      "Bash(grep -n -B3 'for case in' \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_hetero_plainmsg.sh\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_hetero_plainmsg_evals.sh\")",
+      "Bash(grep -n \"COMMON_RATIO\\\\|CONFLICT_RATE\\\\|common\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_homo_plainmsg.sh\")",
+      "Bash(grep -n \"COMMON_RATIO\\\\|CONFLICT_RATE\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_hetero_plainmsg.sh\")",
+      "Bash(grep -n \"COMMON_RATIO\\\\|CONFLICT_RATE\\\\|for case in\\\\|common=\\\\${case\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_hetero_plainmsg_evals.sh\")",
+      "Bash(grep -n \"COMMON_RATIO\\\\|CONFLICT_RATE\\\\|common\" \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu-24.04\\\\\\\\home\\\\\\\\t_fonsec\\\\\\\\epaxos\\\\\\\\run_hetero_plainmsg_evals.sh\")"
+    ],
+    "additionalDirectories": [
+      "\\\\wsl.localhost\\Ubuntu-24.04\\tmp"
+    ]
+  }
+}

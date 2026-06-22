@@ -25,14 +25,14 @@ const DataPath string = "./ycsb/workData/"
 func classifyKey(key string, clientID int, numClients int) int {
 	// YCSB keys are "user" + zero-padded number
 	if key == "" {
-		return 1 // CommonObject for scan/findAll
+		return 1 // DependentObject for scan/findAll
 	}
 
 	// Extract numeric suffix from "user12345" format
 	var keyNum int
 	_, err := fmt.Sscanf(strings.TrimPrefix(key, "user"), "%d", &keyNum)
 	if err != nil {
-		return 1 // CommonObject if parse fails
+		return 1 // DependentObject if parse fails
 	}
 
 	// Partition keyspace by clientID (YCSB default ~1M records total)
@@ -46,7 +46,7 @@ func classifyKey(key string, clientID int, numClients int) int {
 	}
 
 	// Keys outside this client's slice → Dependent (multiple writers possible)
-	return 1 // CommonObject
+	return 1 // DependentObject
 }
 
 type MongoFollower struct {

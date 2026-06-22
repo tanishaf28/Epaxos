@@ -362,7 +362,7 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 
 	// Validate object types
 	for i, objType := range args.ObjTypes {
-		if objType < IndependentObject || objType > HotObject {
+		if objType < IndependentObject || objType > DependentObject {
 			err := fmt.Errorf("invalid object type at index %d: %d", i, objType)
 			reply.ErrorMsg = err
 			return err
@@ -397,20 +397,17 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 	if args.IsMixed {
 		// Count object types in mixed batch
 		indepCount := 0
-		commonCount := 0
-		hotCount := 0
+		depCount := 0
 		for _, objType := range args.ObjTypes {
 			switch objType {
 			case IndependentObject:
 				indepCount++
-			case CommonObject:
-				commonCount++
-			case HotObject:
-				hotCount++
+			case DependentObject:
+				depCount++
 			}
 		}
-		log.Infof("[Client-RPC] Mixed batch | Indep=%d | Common=%d | Hot=%d | Total=%d",
-			indepCount, commonCount, hotCount, batchSize)
+		log.Infof("[Client-RPC] Mixed batch | Indep=%d | Dependent=%d | Total=%d",
+			indepCount, depCount, batchSize)
 	} else {
 		log.Infof("[Client-RPC] Single-type batch | Type=%d | Size=%d",
 			args.ObjType, batchSize)

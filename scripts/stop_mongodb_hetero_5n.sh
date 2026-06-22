@@ -10,9 +10,10 @@ SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 REMOTE_DIR="${REMOTE_DIR:-/home/ubuntu/epaxos}"
 REMOTE_EVAL_DIR="${REMOTE_DIR}/eval"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 LOCAL_EVAL_DIR="${SCRIPT_DIR}/eval"
 MERGED_DIR="${LOCAL_EVAL_DIR}/merged"
-MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
+MERGE_SCRIPT="${REPO_ROOT}/merge_eval.py"
 
 # 5-Node Cluster: 2 Strong (c16) + 3 Weak (c4)
 SERVER_IPS=(
@@ -209,7 +210,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 if [ -f "${MERGE_SCRIPT}" ]; then
     python3 "${MERGE_SCRIPT}" "${LOCAL_EVAL_DIR}" "${MERGED_DIR}/" --ids "${CLIENT_ID_FILTER}"
     if [ $? -eq 0 ]; then
-        echo " ✓ Merged client CSV written to: ${MERGED_DIR}/merged_epaxos_clients_*.csv"
+        echo " ✓ Merged client CSV written to: ${MERGED_DIR}/merged_clients_*.csv"
     else
         echo " ✗ Error merging client CSVs"
     fi
@@ -224,7 +225,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 if [ -f "${MERGE_SCRIPT}" ]; then
     python3 "${MERGE_SCRIPT}" "${LOCAL_EVAL_DIR}" "${MERGED_DIR}/" --servers --ids "${SERVER_ID_FILTER}"
     if [ $? -eq 0 ]; then
-        echo " ✓ Merged server CSV written to: ${MERGED_DIR}/merged_epaxos_servers_*.csv"
+        echo " ✓ Merged server CSV written to: ${MERGED_DIR}/merged_servers_*.csv"
     else
         echo " ✗ Error merging server CSVs"
     fi

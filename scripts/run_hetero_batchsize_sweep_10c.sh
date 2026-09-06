@@ -42,13 +42,16 @@ declare -A HETERO_CONFIG_FOR_N=(
     [11]="${REPO_ROOT}/config/cluster_hetero_11n_10c.conf"
 )
 
-RUNTIME_SECONDS="${RUNTIME_SECONDS:-30}"
+RUNTIME_SECONDS="${RUNTIME_SECONDS:-40}"
 # A number, or the literal string "match" to run clients=servers for each
 # size in the sweep (client VMs are cycled/reused when a size needs more
 # clients than the 10-VM pool has, e.g. n=11 matched — see
 # start_cluster_hetero.sh's read_node_pool).
-CLIENT_COUNT="${CLIENT_COUNT:-10}"
+CLIENT_COUNT="${CLIENT_COUNT:-2}"
 TEST_CASES=(1 10 50 100 500 1000 2000)
+if [ -n "${BATCH_CASES:-}" ]; then
+    read -r -a TEST_CASES <<< "$BATCH_CASES"
+fi
 
 if [[ "${1:-}" == "--help" ]]; then
     cat <<'EOF'
@@ -211,9 +214,10 @@ for n in "${ALL_CLUSTER_SIZES[@]}"; do
             "NUM_SERVERS=${n}" "NUM_CLIENTS=${CURRENT_CLIENT_COUNT}" "THRESHOLD=${t}" "OPS=0"
             "EVAL_TYPE=0" "BATCHSIZE=${batch_size}" "MSG_SIZE=512" "MODE=1"
             "CONFIG_PATH=${CONFIG_PATH}"
-            "INDEP_RATIO=90.0" "NUM_OBJECTS=1000" "READ_RATIO=0.0"
+            "INDEP_RATIO=${INDEP_RATIO_FIXED:-90.0}" "NUM_OBJECTS=1000" "READ_RATIO=0.0"
             "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
             "LOG_LEVEL=info" "THRIFTY=false"
+            "BATCHWINDOWUS=${BATCHWINDOWUS:-0}" "MAXBATCH=${MAXBATCH:-1}"
         )
         run_case "n${n}_batch_${batch_size}" "$RUNTIME_SECONDS"
     done

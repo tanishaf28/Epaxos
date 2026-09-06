@@ -9,8 +9,8 @@
 # sampler_replacement.sh's run_crash_case_sampled (per-client in-process
 # TPS timeline + event injection) -- this script is now its only caller.
 #
-# NUM_CLIENTS=5, BATCHSIZE=100 (default), MSG_SIZE=512, RUNTIME_SECONDS=60,
-# and the 5-host CLIENT_IPS list are shared byte-for-byte with woc's and
+# NUM_CLIENTS=2, BATCHSIZE=1 (default), MSG_SIZE=512, RUNTIME_SECONDS=60,
+# and the 2-host CLIENT_IPS list are shared byte-for-byte with woc's and
 # cabinet's own crash-eval drivers (woc/scripts/run_hetero5_crash_eval.sh;
 # cabinet/scripts/run_hetero_crash_{cab,raft}.sh) so all four protocols'
 # crash evals run under identical offered load and are comparable.
@@ -29,7 +29,7 @@ cd "$SCRIPT_DIR"
 source "${REPO_ROOT}/sampler_replacement.sh"
 
 TARGET="${1:-all}"
-BATCHSIZE_OVERRIDE="${2:-100}"
+BATCHSIZE_OVERRIDE="${2:-1}"
 INDEP_RATIO_OVERRIDE="${3:-90.0}"
 
 START_SCRIPT="${SCRIPT_DIR}/start_cluster_hetero.sh"
@@ -49,10 +49,11 @@ RUNTIME_SECONDS="${RUNTIME_SECONDS:-60}"
 CRASH_TRIGGER_SECONDS="${CRASH_TRIGGER_SECONDS:-10}"
 
 CONFIG_PATH="/home/ubuntu/epaxos/config/cluster_hetero_5n_10c.conf"
+NUM_CLIENTS="${NUM_CLIENTS:-2}"
 
 BASE_ENV=(
     "NUM_SERVERS=5"
-    "NUM_CLIENTS=5"
+    "NUM_CLIENTS=${NUM_CLIENTS}"
     "THRESHOLD=2"
     "BATCHSIZE=${BATCHSIZE_OVERRIDE}"
     "MSG_SIZE=512"
@@ -60,17 +61,19 @@ BASE_ENV=(
     "PIPELINE_MODE=true"
     "MAX_INFLIGHT=5"
     "ENABLE_TIMESERIES=true"
+    "TPS_TIMELINE_INTERVAL_MS=200"
     "LOG_LEVEL=info"
     "CONFIG_PATH=${CONFIG_PATH}"
 )
 
-SERVER_IPS=(
-    "192.168.73.59"
-    "192.168.73.243"
-    "192.168.73.192"
-    "192.168.73.134"
-    "192.168.73.132"
-)
+# Derived from CONFIG_PATH's local twin rather than hardcoded: this array
+# used to hardcode 59/243/192/134/132, but cluster_hetero_5n_10c.conf's
+# actual server IPs at indices 2-4 are 117/16/94 (the pool was regenerated
+# after this script was written) -- sampler_replacement.sh's
+# kill_epaxos_on_node reads SERVER_IPS directly for follower:2/3/4 crash
+# injection, so the stale values were silently killing hosts outside the
+# running cluster for every follower crash case.
+mapfile -t SERVER_IPS < <(awk 'NF >= 2 {print $2}' "${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" | head -5)
 
 # Was (218, 219) -- didn't match the client slice start_cluster_hetero.sh's
 # read_node_pool() actually assigns for NUM_CLIENTS=2 (159, 84), so event
@@ -83,14 +86,9 @@ SERVER_IPS=(
 # cluster_hetero_5n_10c.conf (BASE_ENV above), same config woc/cabinet/raft
 # and the delay-cycle script use, giving the true 5-distinct-host slice
 # below -- same list used by woc/cabinet/raft's crash scripts so all 4
-# protocols run on identical client VMs.
-CLIENT_IPS=(
-    "192.168.73.159"
-    "192.168.73.84"
-    "192.168.73.218"
-    "192.168.73.219"
-    "192.168.73.25"
-)
+# protocols run on identical client VMs (sliced to NUM_CLIENTS).
+mapfile -t _CRASH_CLIENT_POOL < <(awk 'NF >= 2 {print $2}' "${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" | tail -n +6)
+CLIENT_IPS=("${_CRASH_CLIENT_POOL[@]:0:NUM_CLIENTS}")
 
 mkdir -p "$RUN_DIR"
 touch "$touch_marker"
@@ -132,12 +130,14 @@ kill_epaxos_on_node() {
 }
 
 stop_plain_cluster() {
-    # Must match BASE_ENV's NUM_CLIENTS/CONFIG_PATH: stop_cluster_hetero.sh
-    # defaults CLIENT_COUNT to 2 and CONFIG_PATH to the 2-client
-    # cluster_hetero_5n_2s_3w.conf, so without this it silently
-    # stopped/collected the wrong (or too few) clients, leaving processes
-    # running on hosts indefinitely.
-    CLIENT_COUNT=5 CONFIG_PATH="${CONFIG_PATH}" bash "$STOP_SCRIPT"
+    # Must match BASE_ENV's NUM_CLIENTS=2: passing CLIENT_COUNT=5 here (a
+    # leftover value from before CONFIG_PATH was pinned to
+    # cluster_hetero_5n_10c.conf above) made stop_cluster_hetero.sh compute
+    # its merge --ids range for 5 clients while only 2 ever started,
+    # producing harmless-but-noisy "No CSV in .../client7,8,9/" warnings
+    # and a misleading "Clients merged: 2/5" (real data for both actual
+    # clients was still captured correctly either way).
+    CLIENT_COUNT="${NUM_CLIENTS}" CONFIG_PATH="${CONFIG_PATH}" bash "$STOP_SCRIPT"
 }
 
 archive_latest_result() {

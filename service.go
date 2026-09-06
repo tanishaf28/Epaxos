@@ -418,8 +418,19 @@ func (s *EPaxosService) ConsensusService(args *ClientArgs, reply *ClientReply) e
 			args.ObjType, batchSize)
 	}
 
-	// Run consensus and get instance ID(s)
-	primaryInstanceID, _, success, path := epaxosMgr.HandleCommand(cmd)
+	// Run consensus and get instance ID(s). Server-side batching (see
+	// batching.go) only applies to non-mixed, single-object-type commands --
+	// mixed batches keep using HandleCommand's existing per-element
+	// handleMixedBatch path directly, unmerged.
+	var primaryInstanceID InstanceID
+	var success bool
+	var path string
+	if !cmd.IsMixed && epaxosServerBatchingEnabled() {
+		res := submitForBatching(cmd)
+		primaryInstanceID, success, path = res.instanceID, res.success, res.path
+	} else {
+		primaryInstanceID, _, success, path = epaxosMgr.HandleCommand(cmd)
+	}
 
 	if !success {
 		reply.Success = false

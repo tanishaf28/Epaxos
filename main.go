@@ -52,10 +52,20 @@ func main() {
 func runServer() {
 	// Initialize EPaxos manager
 	epaxosMgr = NewEPaxosManager(myServerID, numOfServers)
-	
+
 	log.Infof("Server %d: EPaxos manager initialized | FastQ=%d | SlowQ=%d",
 		myServerID, fastQuorum, slowQuorum)
-	
+
+	// Start the batched-propose accumulator goroutines (batching.go) before
+	// the RPC listener below starts accepting client connections, so every
+	// submitForBatching call is guaranteed to find epaxosBuckets already
+	// populated.
+	if epaxosServerBatchingEnabled() {
+		startEpaxosBatchAccumulators()
+		log.Infof("Server %d: batching enabled | windowUs=%d | maxBatch=%d",
+			myServerID, serverBatchWindowUs, serverMaxBatch)
+	}
+
 	// Schedule crash if configured
 	crashList := prepCrashList()
 	scheduleCrash(crashList)
@@ -76,7 +86,9 @@ func runServer() {
 		// Nothing to initialize
 	case MongoDB:
 		go mongoDBCleanUp()
-		initMongoDB()
+		if err := initMongoDB(); err != nil {
+			log.Fatalf("Server %d: MongoDB initialization failed: %v", myServerID, err)
+		}
 	}
 	
 	// Register RPC service

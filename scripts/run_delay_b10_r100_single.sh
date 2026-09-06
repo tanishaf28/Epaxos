@@ -44,13 +44,12 @@ BASE_ENV=(
     "LOG_LEVEL=info"
 )
 
-SERVER_IPS=(
-    "192.168.73.59"
-    "192.168.73.243"
-    "192.168.73.192"
-    "192.168.73.134"
-    "192.168.73.132"
-)
+# Derived from CONFIG_PATH at runtime rather than hardcoded: this array
+# used to hardcode 59/243/192/134/132, but cluster_hetero_5n_10c.conf's
+# actual server IPs at indices 2-4 are 117/16/94 (the pool was regenerated
+# after this script was written), so netem delay was silently landing on
+# hosts outside the running cluster.
+mapfile -t SERVER_IPS < <(awk 'NF >= 2 {print $2}' "$CONFIG_PATH" | head -5)
 
 mkdir -p "$RUN_DIR"
 

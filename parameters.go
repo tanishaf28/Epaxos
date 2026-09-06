@@ -59,6 +59,23 @@ var evalType int
 var batchsize int
 var msgsize int
 
+// Server-side batching, ported from upstream efficient/epaxos's actual
+// mechanism (see batching.go): every replica gates new proposals behind an
+// on/off switch that closes the instant one arrives (letting concurrent
+// clients' proposals accumulate) and reopens every serverBatchWindowUs
+// microseconds (upstream's fixed 5ms fastClock tick, made configurable
+// here), at which point everything queued - up to serverMaxBatch requests
+// (upstream's MAX_BATCH) - commits together in one Paxos instance instead
+// of one instance per client RPC. Independent of batchsize (client-side
+// pre-packing). serverBatchWindowUs=0 or serverMaxBatch=1 (the defaults)
+// disables server-side batching entirely, preserving today's
+// per-RPC-instance behavior. Note: unlike WOC/Cabinet's same-named flags
+// (a window measured from the first accumulated request), this is a fixed
+// periodic tick independent of arrival timing - a deliberate difference,
+// since matching upstream's actual mechanism was the point.
+var serverBatchWindowUs int
+var serverMaxBatch int
+
 // Object distribution (for fair comparison with WOC's objectmap.go)
 var indepRatio float64 // % of independent objects; remainder is DependentObject
 var numObjects int     // total key-space size, split into indep/dependent pools by indepRatio
@@ -85,6 +102,8 @@ func loadCommandLineInputs() {
 	flag.IntVar(&threshold, "t", 2, "# of failures tolerated (F)")
 
 	flag.IntVar(&batchsize, "b", 1, "batch size")
+	flag.IntVar(&serverBatchWindowUs, "batchwindowus", 0, "server-side batch accumulation: periodic gate-reopen tick in microseconds, upstream efficient/epaxos's fastClock (0 = disabled)")
+	flag.IntVar(&serverMaxBatch, "maxbatch", 1, "max requests merged into one consensus instance per tick, upstream's MAX_BATCH (1 = disabled)")
 	flag.IntVar(&myServerID, "id", 0, "this server ID")
 	flag.StringVar(&configPath, "path", "./config/cluster_localhost.conf", "config file path")
 
@@ -118,6 +137,14 @@ func loadCommandLineInputs() {
 	flag.IntVar(&pinServer, "pinserver", -1, "pin client to specific server ID (required; no round-robin default)")
 
 	flag.Parse()
+
+	if serverMaxBatch < 1 {
+		serverMaxBatch = 1
+	}
+	if serverBatchWindowUs < 0 {
+		serverBatchWindowUs = 0
+	}
+
 	// Fast-path quorum uses the paper's F+floor((F+1)/2) formula (Moraru/
 	// Andersen/Kaminsky SOSP'13 §4.3), not github.com/efficient/epaxos's
 	// checked-in `inst.lb.preAcceptOKs >= r.N/2` shortcut (epaxos.go:1050).

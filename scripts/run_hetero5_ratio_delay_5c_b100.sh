@@ -31,13 +31,13 @@ RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 
 DELAY_MS="${DELAY_MS:-10}"
 JITTER_MS="${JITTER_MS:-10}"
-RUNTIME_SECONDS="${RUNTIME_SECONDS:-30}"
+RUNTIME_SECONDS="${RUNTIME_SECONDS:-60}"
 DELAY_APPLIED=false
 CLUSTER_ACTIVE=false
 
 BASE_ENV=(
     "NUM_SERVERS=5"
-    "NUM_CLIENTS=5"
+    "NUM_CLIENTS=2"
     "CONFIG_PATH=${REPO_ROOT}/config/cluster_hetero_5n_10c.conf"
     "THRESHOLD=2"
     "BATCHSIZE=100"
@@ -50,13 +50,12 @@ BASE_ENV=(
 # independent) -> 0 (all dependent).
 TEST_CASES=(100.0 90.0 80.0 60.0 40.0 20.0 10.0 0.0)
 
-SERVER_IPS=(
-    "192.168.73.59"
-    "192.168.73.243"
-    "192.168.73.192"
-    "192.168.73.134"
-    "192.168.73.132"
-)
+# Derived from CONFIG_PATH at runtime rather than hardcoded: this array
+# used to hardcode 59/243/192/134/132, but cluster_hetero_5n_10c.conf's
+# actual server IPs at indices 2-4 are 117/16/94 (the pool was regenerated
+# after this script was written), so netem delay was silently landing on
+# hosts outside the running cluster.
+mapfile -t SERVER_IPS < <(awk 'NF >= 2 {print $2}' "${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" | head -5)
 
 mkdir -p "$RUN_DIR"
 
@@ -125,7 +124,7 @@ archive_case() {
 
 cleanup() {
     if [ "$CLUSTER_ACTIVE" = true ]; then
-        CLIENT_COUNT=5 CONFIG_PATH="${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" bash "$STOP_SCRIPT" || true
+        CLIENT_COUNT=2 CONFIG_PATH="${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" bash "$STOP_SCRIPT" || true
     fi
     if [ "$DELAY_APPLIED" = true ]; then
         remove_server_delay || true
@@ -147,7 +146,7 @@ run_case() {
     echo "  Running for ${RUNTIME_SECONDS}s..."
     sleep "$RUNTIME_SECONDS"
 
-    CLIENT_COUNT=5 CONFIG_PATH="${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" bash "$STOP_SCRIPT"
+    CLIENT_COUNT=2 CONFIG_PATH="${REPO_ROOT}/config/cluster_hetero_5n_10c.conf" bash "$STOP_SCRIPT"
     CLUSTER_ACTIVE=false
 
     archive_case "$label" "$marker"

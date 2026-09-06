@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/gob"
+	"errors"
+	"fmt"
 	"net"
 	"net/rpc"
 	"os"
@@ -12,6 +14,19 @@ import (
 	"epaxos/config"
 	"epaxos/mongodb"
 )
+
+// gob requires every concrete type ever assigned to an interface field
+// crossing the RPC wire to be registered before it does so. service.go
+// sets Reply.ErrorMsg (an error interface field) via errors.New/fmt.Errorf
+// (both *errors.errorString) and fmt.Errorf with %w (*fmt.wrapError) -- the
+// only other gob.Register call (initMongoDB) only runs in MongoDB mode, so
+// plainmsg mode had no error-type registration at all, would fail to gob-
+// encode as soon as any of the 3 ErrorMsg-setting error paths in service.go
+// actually fired.
+func init() {
+	gob.Register(errors.New(""))
+	gob.Register(fmt.Errorf("%w", errors.New("")))
+}
 
 // dialServerRPC creates an optimized RPC connection for server-to-server communication
 func dialServerRPC(address string, timeout time.Duration) (*rpc.Client, error) {
@@ -137,8 +152,18 @@ func cleanupConnections() {
 	log.Infof("Server %d: all connections closed", myServerID)
 }
 
-// MongoDB initialization (same as WOC)
-func initMongoDB() {
+// initMongoDB returns an error instead of just logging and returning as it
+// used to: its sole caller (runServer) discarded the return entirely, so a
+// failed connection left mongoDbFollower nil and the server proceeded to
+// register/accept RPCs anyway. Worse than that alone: with no nil check
+// here, a nil mongoDbFollower (NewMongoFollower returns nil on a client
+// construction failure - see mongodb/mgdb_follower.go) meant the very next
+// line, ClearTable -> FollowerAPI, dereferenced a nil receiver and panicked
+// the whole server process. Every real MongoDB request that DID reach a
+// live-but-broken server would then fail before ever recording anything, so
+// server-side metrics looked silently empty with no clear reason why - same
+// symptom found and fixed in woc's initMongoDB.
+func initMongoDB() error {
 	gob.Register([]mongodb.Query{})
 
 	if mode == Localhost {
@@ -147,26 +172,28 @@ func initMongoDB() {
 		mongoDbFollower = mongodb.NewMongoFollower(mongoClientNum, int(1), 0)
 	}
 
+	if mongoDbFollower == nil {
+		return fmt.Errorf("mongodb follower initialization failed")
+	}
+
 	queriesToLoad, err := mongodb.ReadQueryFromFile(mongodb.DataPath + "workload.dat")
 	if err != nil {
-		log.Errorf("getting load data failed | error: %v", err)
-		return
+		return fmt.Errorf("getting load data failed: %w", err)
 	}
 
 	err = mongoDbFollower.ClearTable("usertable")
 	if err != nil {
-		log.Errorf("clean up table failed | err: %v", err)
-		return
+		return fmt.Errorf("clean up table failed: %w", err)
 	}
 
 	log.Debugf("loading data to MongoDB")
 	_, _, err = mongoDbFollower.FollowerAPI(queriesToLoad)
 	if err != nil {
-		log.Errorf("load data failed | error: %v", err)
-		return
+		return fmt.Errorf("load data failed: %w", err)
 	}
 
 	log.Infof("MongoDB initialization done")
+	return nil
 }
 
 // mongoDBCleanUp cleans up MongoDB connections on shutdown

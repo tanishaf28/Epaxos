@@ -43,13 +43,16 @@ declare -A HETERO_CONFIG_FOR_N=(
     [11]="${REPO_ROOT}/config/cluster_hetero_11n_10c.conf"
 )
 
-RUNTIME_SECONDS="${RUNTIME_SECONDS:-30}"
+RUNTIME_SECONDS="${RUNTIME_SECONDS:-60}"
 # A number, or the literal string "match" to run clients=servers for each
 # size in the sweep (client VMs are cycled/reused when a size needs more
 # clients than the 10-VM pool has, e.g. n=11 matched — see
 # start_cluster_hetero.sh's read_node_pool).
-CLIENT_COUNT="${CLIENT_COUNT:-5}"
+CLIENT_COUNT="${CLIENT_COUNT:-2}"
 TEST_CASES=(100.0 90.0 80.0 60.0 40.0 20.0 10.0 0.0)
+if [ -n "${RATIO_CASES:-}" ]; then
+    read -r -a TEST_CASES <<< "$RATIO_CASES"
+fi
 
 if [[ "${1:-}" == "--help" ]]; then
     cat <<'EOF'
@@ -65,6 +68,7 @@ Environment overrides:
   CLIENT_COUNT=5              client count -- a number, or "match" to run
                                clients=servers for each size
   CLUSTER_SIZES="3 5 7 11"    override the cluster-size sweep
+  RATIO_CASES="100.0 0.0"     override the indep-ratio sweep points
 
 Results archived under: results/hetero_ratio_sweep_10c/<timestamp>/<label>/
 EOF
@@ -139,8 +143,14 @@ archive_latest_result() {
     if [ -d "$merged_dir" ]; then
         find "$merged_dir" -maxdepth 1 -name "*.csv" "${find_args[@]}" \
             -exec cp {} "$dest_dir/" \; 2>/dev/null || true
+        # Previously fell back to unconditionally copying whatever sat in
+        # merged_dir when nothing matched -newer -- silently re-archiving a
+        # stale/leftover merged CSV from an earlier ratio case (e.g. one
+        # whose client got stuck/timed out and never wrote fresh output) as
+        # if it belonged to this one. Fail loudly instead so a stuck run
+        # shows up as a gap, not duplicated data under two different labels.
         if [ -z "$(ls "$dest_dir"/*.csv 2>/dev/null)" ]; then
-            cp "$merged_dir"/*.csv "$dest_dir/" 2>/dev/null || true
+            echo "  WARNING: no fresh merged CSV found for '${label}' (case likely failed/hung) -- leaving ${dest_dir} empty" >&2
         fi
     fi
 
@@ -214,6 +224,7 @@ for n in "${ALL_CLUSTER_SIZES[@]}"; do
             "INDEP_RATIO=${indep}" "NUM_OBJECTS=1000" "READ_RATIO=0.0"
             "PIPELINE_MODE=true" "MAX_INFLIGHT=${MAX_INFLIGHT:-5}"
             "LOG_LEVEL=info" "THRIFTY=false"
+            "BATCHWINDOWUS=${BATCHWINDOWUS:-0}" "MAXBATCH=${MAXBATCH:-1}"
         )
         run_case "n${n}_ratio_${indep}" "$RUNTIME_SECONDS"
     done

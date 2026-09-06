@@ -94,6 +94,17 @@ type Command struct {
 
 	Payload   interface{} // [][]byte or []mongodb.Query
 	Timestamp time.Time   // For cleanup of stale entries
+
+	// ClientIDs/ClientClocks are parallel to ObjIDs/ObjTypes/Payload when
+	// this Command is a server-side merge of multiple different clients'
+	// requests into one instance (see batching.go) -- index i identifies
+	// which original client contributed ObjIDs[i]/Payload[i]. Empty/nil
+	// (the default) means a single client's own request, matching every
+	// existing caller that never sets these fields; ClientID/ClientClock
+	// above stay set to the first merged client's values for logging/
+	// dedup-keying compatibility with existing single-client code.
+	ClientIDs    []int
+	ClientClocks []int
 }
 
 // Instance represents a Paxos instance with EPaxos attributes

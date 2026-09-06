@@ -46,6 +46,10 @@ LOG_LEVEL="${LOG_LEVEL:-info}"
 THRIFTY="${THRIFTY:-false}"
 CRASH_TIME=0
 CRASH_MODE=0
+# Server-side batch accumulation (0/1 = disabled, today's per-RPC-instance
+# behavior). See batching.go's submitForBatching/processEpaxosBatch.
+BATCHWINDOWUS="${BATCHWINDOWUS:-0}"
+MAXBATCH="${MAXBATCH:-1}"
 
 # Safety guard: this launcher is intended for no-crash runs.
 if [ "${CRASH_MODE}" -ne 0 ] || [ "${CRASH_TIME}" -ne 0 ]; then
@@ -159,6 +163,8 @@ start_server() {
             -pd=true \
             -role=0 \
             -b=${BATCHSIZE} \
+            -batchwindowus=${BATCHWINDOWUS} \
+            -maxbatch=${MAXBATCH} \
             -thrifty=${THRIFTY} \
             -ct=0 \
             -cm=0 \

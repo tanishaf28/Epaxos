@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -20,19 +21,28 @@ import (
 	"epaxos/mongodb"
 )
 
+// hotDependentObjID is the single, fixed, cluster-wide-shared key every
+// DependentObject-classified op targets — matching real efficient/epaxos's
+// own -c workload generator exactly (client/client.go: karray[i] = 42 for
+// the conflicting share, a literal single shared key), not a probabilistic
+// pool. -indep's ratio still decides the conflict PROBABILITY (pickObjType
+// below), same as before; only the DEPENDENT share's key selection changed,
+// from "uniform-random pick within a 100-key pool" to "always this one
+// key" - real, concurrent contention on one shared key is what actually
+// drives EPaxos's own PreAccept interference detection to disagree and
+// fall back to Accept, rather than a protocol-level override forcing it.
+const hotDependentObjID = "obj-hot-0"
+
 var (
 	indepObjIDs   []string
-	depObjIDs     []string
 	objIDPoolInit sync.Once
 )
 
-// initObjectIDPool builds the two-tier object pool, sized by -numobjects and
-// split by -indep, mirroring WOC's objectmap.go InitObjectRegistry exactly:
-// the keyspace is divided once, deterministically, into an Independent and a
-// Dependent range — there is no third "common"/"hot" tier. Independent IDs
-// are namespaced per client so they can never collide across clients (single-
-// writer approximation); Dependent IDs are shared cluster-wide so EPaxos's
-// conflict detection actually has something to detect.
+// initObjectIDPool builds the independent-object pool, sized by -numobjects
+// and -indep, mirroring WOC's objectmap.go InitObjectRegistry: independent
+// IDs are namespaced per client so they can never collide across clients
+// (single-writer approximation). Dependent ops don't draw from a pool at
+// all anymore - see hotDependentObjID.
 func initObjectIDPool(clientID int) {
 	objIDPoolInit.Do(func() {
 		indepCount := int(float64(numObjects) * indepRatio / 100.0)
@@ -42,21 +52,16 @@ func initObjectIDPool(clientID int) {
 		if indepCount > numObjects {
 			indepCount = numObjects
 		}
-		depCount := numObjects - indepCount
-		if depCount < 1 {
-			depCount = 1 // always keep at least one dependent key to pick from
+		if indepCount < 1 {
+			indepCount = 1 // always keep at least one independent key to pick from
 		}
 
 		indepObjIDs = make([]string, indepCount)
 		for i := 0; i < indepCount; i++ {
 			indepObjIDs[i] = fmt.Sprintf("obj-indep-%d-%d", clientID, i)
 		}
-		depObjIDs = make([]string, depCount)
-		for i := 0; i < depCount; i++ {
-			depObjIDs[i] = fmt.Sprintf("obj-dep-%d", i)
-		}
-		log.Infof("[Client %d] Pre-generated object ID pools (numobjects=%d, indep=%d, dependent=%d)",
-			clientID, numObjects, indepCount, depCount)
+		log.Infof("[Client %d] Pre-generated independent object ID pool (numobjects=%d, indep=%d) | dependent share -> single hot key %q",
+			clientID, numObjects, indepCount, hotDependentObjID)
 	})
 }
 
@@ -68,14 +73,15 @@ func pickObjType() int {
 	return DependentObject
 }
 
-// pickObjID does a uniform-random pick within the given type's pool — matching
-// WOC's "-numobjects controls key-space size, uniform-random pick, no Zipfian".
+// pickObjID returns hotDependentObjID for DependentObject (every dependent
+// op targets the same single shared key, matching real EPaxos's -c
+// mechanism), or a uniform-random pick within the independent pool
+// otherwise.
 func pickObjID(objType int) string {
-	pool := depObjIDs
 	if objType == IndependentObject {
-		pool = indepObjIDs
+		return indepObjIDs[rand.Intn(len(indepObjIDs))]
 	}
-	return pool[rand.Intn(len(pool))]
+	return hotDependentObjID
 }
 
 // pickCmdType rolls READ with probability readRatio%, WRITE otherwise — matches
@@ -342,6 +348,14 @@ func mongoQueryObjectID(q mongodb.Query) string {
 	}
 }
 
+func timelineInterval() time.Duration {
+	intervalMs, err := strconv.Atoi(strings.TrimSpace(os.Getenv("TPS_TIMELINE_INTERVAL_MS")))
+	if err != nil || intervalMs <= 0 {
+		intervalMs = 500
+	}
+	return time.Duration(intervalMs) * time.Millisecond
+}
+
 func startTimelineSampler(clientID int, stop <-chan struct{}) {
 	if os.Getenv("ENABLE_TIMESERIES") != "true" && os.Getenv("TIMESERIES_ENABLED") != "true" {
 		return
@@ -373,7 +387,7 @@ func startTimelineSampler(clientID int, stop <-chan struct{}) {
 	lastOps := atomic.LoadInt64(&globalClientMetrics.OpsTotal)
 	lastLatSum := atomic.LoadInt64(&globalClientMetrics.LatSumMs)
 	lastLatCount := atomic.LoadInt64(&globalClientMetrics.LatCount)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(timelineInterval())
 	defer ticker.Stop()
 	defer func() {
 		writer.Flush()

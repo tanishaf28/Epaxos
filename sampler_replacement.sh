@@ -129,7 +129,7 @@ run_crash_case_sampled() {
 
     inject_event "post_crash"
     sleep "$RUNTIME_SECONDS"
-    stop_plain_cluster
+    stop_plain_cluster || true
     CLUSTER_ACTIVE=false
     archive_latest_result "$label"
 }
@@ -158,7 +158,7 @@ run_d1_case_sampled() {
     sleep "$RUNTIME_SECONDS"
 
     remove_all_delay
-    stop_plain_cluster
+    stop_plain_cluster || true
     CLUSTER_ACTIVE=false
     archive_latest_result "$label"
 }
@@ -224,7 +224,7 @@ run_d4_case_sampled() {
         cycle=$(( cycle + 1 ))
     done
     remove_all_delay
-    stop_plain_cluster
+    stop_plain_cluster || true
     CLUSTER_ACTIVE=false
     archive_latest_result "$label"
 }

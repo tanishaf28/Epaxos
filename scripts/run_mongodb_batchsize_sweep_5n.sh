@@ -46,7 +46,7 @@ if [[ "${1:-}" == "--help" ]]; then
 Usage: bash run_mongodb_batchsize_sweep_5n.sh
 
 Sweeps BATCHSIZE over 1,10,50,100,500,1000,2000 (matches
-run_hetero_plainmsg_evals.sh's eval2) with INDEP_RATIO=90, MSG_SIZE=512
+run_hetero_plainmsg_evals.sh's eval2) with INDEP_RATIO="${INDEP_RATIO:-90.0}", MSG_SIZE=512
 fixed, against the heterogeneous 5-node (2 strong + 3 weak) MongoDB
 replica set (start_mongodb_hetero_5n.sh, -et=1).
 
@@ -113,7 +113,7 @@ run_case() {
     echo "=================================================="
 
     CLUSTER_ACTIVE=true
-    INDEP_RATIO=90.0 BATCHSIZE="$batch_size" MSG_SIZE=512 NUM_OBJECTS=1000 READ_RATIO=0.0 \
+    INDEP_RATIO="${INDEP_RATIO:-90.0}" BATCHSIZE="$batch_size" MSG_SIZE=512 NUM_OBJECTS=1000 READ_RATIO=0.0 \
         bash "$START_SCRIPT" "$WORKLOAD"
     sleep "$RUNTIME_SECONDS"
     bash "$STOP_SCRIPT"

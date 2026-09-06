@@ -589,7 +589,29 @@ func (m *EPaxosManager) runFastPath(instanceID InstanceID, cmd *Command) (bool, 
 	log.Debugf("[FastPath] Collected replies | Instance=%s | PreAcceptOKs=%d | FullMatches=%d | Nacks=%d | AllEqual=%v | AllCommitted=%v",
 		instanceID, preAcceptOKCount, fullMatchCount, nackCount, allEqual, allCommitted)
 
-	if matchCount >= fastQuorum && allEqual && allCommitted {
+	// DependentObject never takes the fast path, even if every replica
+	// happened to agree - this makes -indep's ratio mean the same thing
+	// (a deterministic conflict/slow-path rate) here as it does in WOC,
+	// where DependentObject always routes straight to the slow path by
+	// design. Real EPaxos has no such concept - interference alone decides
+	// fast vs. slow - so this is a workload/benchmark-comparability
+	// choice, not a protocol fix. The pure-organic alternative (real
+	// interference via the shared hot key, pickObjID in client.go) was
+	// tried first and found too weak to drive a legible ratio sweep at low
+	// client counts (2 clients only produced ~0.5-3.5% measured conflicts
+	// against a 10% nominal dependent share, even at 7 clients) - this
+	// override is applied after allCommitted/allEqual are computed rather
+	// than skipping the PreAccept broadcast outright, because PreAccept is
+	// the only RPC that registers this key's access in every OTHER
+	// replica's own conflict tables (RegisterObjectAccess, state.go) -
+	// Commit never does. Skipping the broadcast would leave every replica
+	// but the leader unaware this key was ever touched, corrupting their
+	// future interference checks against it. This way the full PreAccept
+	// round - and the real, cluster-wide dependency registration it
+	// produces - still happens exactly as it would if this command were
+	// allowed to fast-path; only the final commit decision is forced to
+	// Accept instead.
+	if matchCount >= fastQuorum && allEqual && allCommitted && cmd.ObjType != DependentObject {
 		inst.Lock()
 		inst.Seq = seq   // Keep original seq
 		inst.Deps = deps // Keep original deps
@@ -1115,8 +1137,21 @@ func (m *EPaxosManager) startRecoveryForInstance(instanceID InstanceID) {
 		return
 	}
 
-	// Rule 3: If N-F or more replicas have PREACCEPTED with same attrs →
-	//         can fast-path commit (EPaxos "identical PreAccept" rule)
+	// Rule 3: EPaxos paper Figure 3, lines 32-33 (the simplified recovery
+	// procedure this codebase otherwise follows). If at least floor(N/2)
+	// replicas OTHER than the original command leader (instanceID.ReplicaID)
+	// reply PREACCEPTED, at the DEFAULT ballot (0), with IDENTICAL
+	// attributes, the paper says to run the Paxos-Accept phase for those
+	// attributes - NOT commit directly. A previous version of this rule
+	// committed directly once N-F replicas agreed, skipping the Accept
+	// round the paper requires here; unlike the ordinary (non-recovery)
+	// fast path in Figure 2 - where the ORIGINAL leader itself collects
+	// the quorum - a NEW leader recovering someone else's instance can't
+	// be sure no other replica already committed different attributes via
+	// the paper's optimized (TryPreAccept-based) fast-path recovery, which
+	// this codebase doesn't implement; running a real Accept round is what
+	// makes the recovered value safe regardless. floor(N/2) == threshold
+	// since N == 2*threshold+1.
 	type attrKey struct {
 		seq      int
 		depsHash string
@@ -1127,7 +1162,7 @@ func (m *EPaxosManager) startRecoveryForInstance(instanceID InstanceID) {
 	attrCmd := make(map[attrKey]*Command)
 
 	for _, r := range prepareReplies {
-		if r.Status == PREACCEPTED {
+		if r.Status == PREACCEPTED && r.Ballot == 0 && r.ReplicaID != instanceID.ReplicaID {
 			depsStr := fmt.Sprintf("%v", r.Deps)
 			k := attrKey{r.Seq, depsStr}
 			attrCount[k]++
@@ -1137,21 +1172,18 @@ func (m *EPaxosManager) startRecoveryForInstance(instanceID InstanceID) {
 		}
 	}
 
-	// N-F = numOfServers - threshold (guarantees fast path safety)
-	fastRecoveryQuorum := numOfServers - threshold
+	recoveryQuorum := threshold // floor(N/2), N == 2*threshold+1
 	for k, count := range attrCount {
-		if count >= fastRecoveryQuorum {
-			log.Infof("[Recovery] Fast recovery: %d replicas agree on attrs | Instance=%s",
+		if count >= recoveryQuorum {
+			log.Infof("[Recovery] %d replicas (excl. original leader) agree on PreAccepted attrs at default ballot - running Paxos-Accept | Instance=%s",
 				count, instanceID)
 			inst.Lock()
 			inst.Seq = attrSeq[k]
 			inst.Deps = attrDeps[k]
 			inst.Command = attrCmd[k]
-			inst.Status = COMMITTED
 			inst.Ballot = newBallot
 			inst.Unlock()
-			m.updateCommittedUpTo(instanceID.ReplicaID, instanceID.InstanceNo)
-			go m.broadcastCommit(instanceID, attrSeq[k], attrDeps[k])
+			m.runRecoveryAccept(instanceID, attrCmd[k], attrSeq[k], attrDeps[k], newBallot)
 			return
 		}
 	}
